@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  OrderFlow Global Security Posture: GuardDuty Detector (S3, EKS,
+  Runtime Monitoring), Security Hub CSPM, CIS v3.0.0, FSBP v1.0.0,
+  and Security Hub OrganizationConfiguration for orderflow-audit.
+
+Metadata:
+  OrderFlowAccount: orderflow-audit
+  Author: Kien Nguyen
+  License: Apache-2.0
+
+Parameters:
+  FindingPublishingFrequency:
+    Type: String
+    Default: FIFTEEN_MINUTES
+    AllowedValues:
+      - FIFTEEN_MINUTES
+      - ONE_HOUR
+      - SIX_HOURS
+    Description: GuardDuty finding export cadence to Security Hub.
+
+  SecurityHubConfigurationType:
+    Type: String
+    Default: LOCAL
+    AllowedValues:
+      - LOCAL
+      - CENTRAL
+    Description: >-
+      Use LOCAL for per-region standards or CENTRAL for Security Hub
+      central configuration policies across OrderFlow OUs.
+
+  EnableRuntimeMonitoring:
+    Type: String
+    Default: ENABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Description: Toggle OS/container runtime monitoring on GuardDuty.
+
+Conditions:
+  IsCentralConfig: !Equals
+    - !Ref SecurityHubConfigurationType
+    - CENTRAL
+
+Resources:
+  OrderFlowGuardDutyDetector:
+    Type: AWS::GuardDuty::Detector
+    Properties:
+      Enable: true
+      FindingPublishingFrequency: !Ref FindingPublishingFrequency
+      Features:
+        - Name: S3_DATA_EVENTS
+          Status: ENABLED
+        - Name: EKS_AUDIT_LOGS
+          Status: ENABLED
+        - Name: EBS_MALWARE_PROTECTION
+          Status: ENABLED
+        - Name: RUNTIME_MONITORING
+          Status: !Ref EnableRuntimeMonitoring
+          AdditionalConfiguration:
+            - Name: EKS_ADDON_MANAGEMENT
+              Status: !Ref EnableRuntimeMonitoring
+            - Name: ECS_FARGATE_AGENT_MANAGEMENT
+              Status: !Ref EnableRuntimeMonitoring
+            - Name: EC2_AGENT_MANAGEMENT
+              Status: !Ref EnableRuntimeMonitoring
+      Tags:
+        - Key: AccountScope
+          Value: orderflow-audit
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  OrderFlowSecurityHub:
+    Type: AWS::SecurityHub::Hub
+    Properties:
+      AutoEnableControls: true
+      ControlFindingGenerator: SECURITY_CONTROL
+      EnableDefaultStandards: false
+      Tags:
+        AccountScope: orderflow-audit
+        ManagedBy: CloudFormation
+
+  OrderFlowFsbpStandard:
+    Type: AWS::SecurityHub::Standard
+    DependsOn: OrderFlowSecurityHub
+    Properties:
+      StandardsArn: !Sub
+        - "arn:${Part}:securityhub:${Reg}::standards/${Std}"
+        - Part: !Ref AWS::Partition
+          Reg: !Ref AWS::Region
+          Std: "aws-foundational-security-best-practices/v/1.0.0"
+
+  OrderFlowCisStandard:
+    Type: AWS::SecurityHub::Standard
+    DependsOn: OrderFlowSecurityHub
+    Properties:
+      StandardsArn: !Sub
+        - "arn:${Part}:securityhub:${Reg}::standards/${Std}"
+        - Part: !Ref AWS::Partition
+          Reg: !Ref AWS::Region
+          Std: "cis-aws-foundations-benchmark/v/3.0.0"
+
+  OrderFlowSecurityHubOrgConfig:
+    Type: AWS::SecurityHub::OrganizationConfiguration
+    DependsOn: OrderFlowSecurityHub
+    Properties:
+      AutoEnable: true
+      AutoEnableStandards: !If
+        - IsCentralConfig
+        - NONE
+        - DEFAULT
+      ConfigurationType: !Ref SecurityHubConfigurationType
+
+Outputs:
+  GuardDutyDetectorId:
+    Description: OrderFlow GuardDuty Detector ID in orderflow-audit.
+    Value: !Ref OrderFlowGuardDutyDetector
+
+  SecurityHubId:
+    Description: OrderFlow Security Hub resource ID.
+    Value: !Ref OrderFlowSecurityHub
+
+  SecurityHubOrgConfigId:
+    Description: Security Hub OrganizationConfiguration identifier.
+    Value: !Ref OrderFlowSecurityHubOrgConfig

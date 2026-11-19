@@ -1,0 +1,193 @@
+# OrderFlow Global - Aurora PostgreSQL 18 Global Primary & RDS Proxy
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global Aurora PostgreSQL 18 primary cluster in us-east-1,
+  GlobalCluster, Graviton db.r8g.large nodes, and TLS RDS Proxy.
+
+Parameters:
+  GlobalClusterIdentifier:
+    Type: String
+    Default: orderflow-global-aurora
+    Description: Canonical Aurora Global Database identifier.
+  PrimaryClusterIdentifier:
+    Type: String
+    Default: orderflow-aurora-us-east-1
+    Description: Primary Aurora regional DB cluster identifier.
+  EngineVersion:
+    Type: String
+    Default: '18.3'
+    AllowedValues:
+      - '18.3'
+      - '17.4'
+    Description: Aurora PostgreSQL major/minor engine version.
+  ParameterGroupFamily:
+    Type: String
+    Default: aurora-postgresql18
+    AllowedValues:
+      - aurora-postgresql18
+      - aurora-postgresql17
+    Description: DBClusterParameterGroup family matching EngineVersion.
+  InstanceClass:
+    Type: String
+    Default: db.r8g.large
+    AllowedValues:
+      - db.r8g.large
+      - db.r8g.xlarge
+      - db.r7g.large
+    Description: Graviton4 memory-optimized DB instance class.
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: Primary KMS MRK ARN encrypting Aurora storage & secrets.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private database subnets across three AZs.
+  DbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group allowing 5432 from ProxySG only.
+  ProxySecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group allowing 5432 from app workloads.
+
+Resources:
+  OrderFlowGlobalCluster:
+    Type: AWS::RDS::GlobalCluster
+    Properties:
+      GlobalClusterIdentifier: !Ref GlobalClusterIdentifier
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      StorageEncrypted: true
+      DeletionProtection: true
+
+  AuroraPgClusterParamGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: OrderFlow Aurora PG18 TLS and slow-query baseline.
+      Family: !Ref ParameterGroupFamily
+      Parameters:
+        rds.force_ssl: '1'
+        log_min_duration_statement: '500'
+        shared_preload_libraries: pg_stat_statements
+
+  AuroraSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for OrderFlow Aurora.
+      SubnetIds: !Ref PrivateSubnetIds
+
+  OrderFlowPrimaryCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier: !Ref PrimaryClusterIdentifier
+      GlobalClusterIdentifier: !Ref OrderFlowGlobalCluster
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      DBClusterParameterGroupName: !Ref AuroraPgClusterParamGroup
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DbSecurityGroupId
+      StorageEncrypted: true
+      KmsKeyId: !Ref KmsKeyArn
+      MasterUsername: orderflow_admin
+      ManageMasterUserPassword: true
+      MasterUserSecret:
+        KmsKeyId: !Ref KmsKeyArn
+      BackupRetentionPeriod: 14
+      DeletionProtection: true
+      EnableIAMDatabaseAuthentication: true
+      EnableCloudwatchLogsExports:
+        - postgresql
+      Port: 5432
+
+  OrderFlowPrimaryWriter:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: orderflow-aurora-use1-writer
+      DBClusterIdentifier: !Ref OrderFlowPrimaryCluster
+      Engine: aurora-postgresql
+      DBInstanceClass: !Ref InstanceClass
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsKMSKeyId: !Ref KmsKeyArn
+      PerformanceInsightsRetentionPeriod: 7
+
+  OrderFlowPrimaryReader:
+    Type: AWS::RDS::DBInstance
+    DependsOn: OrderFlowPrimaryWriter
+    Properties:
+      DBInstanceIdentifier: orderflow-aurora-use1-reader
+      DBClusterIdentifier: !Ref OrderFlowPrimaryCluster
+      Engine: aurora-postgresql
+      DBInstanceClass: !Ref InstanceClass
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsKMSKeyId: !Ref KmsKeyArn
+      PerformanceInsightsRetentionPeriod: 7
+
+  RdsProxySecretsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadOrderFlowMasterSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !GetAtt >-
+                  OrderFlowPrimaryCluster.MasterUserSecret.SecretArn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub >-
+                      secretsmanager.${AWS::Region}.amazonaws.com
+
+  OrderFlowDbProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: orderflow-aurora-proxy
+      EngineFamily: POSTGRESQL
+      RequireTLS: true
+      IdleClientTimeout: 1800
+      RoleArn: !GetAtt RdsProxySecretsRole.Arn
+      VpcSubnetIds: !Ref PrivateSubnetIds
+      VpcSecurityGroupIds:
+        - !Ref ProxySecurityGroupId
+      Auth:
+        - AuthScheme: SECRETS
+          IAMAuth: REQUIRED
+          SecretArn: !GetAtt >-
+            OrderFlowPrimaryCluster.MasterUserSecret.SecretArn
+
+  OrderFlowDbProxyTargets:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref OrderFlowDbProxy
+      TargetGroupName: default
+      DBClusterIdentifiers:
+        - !Ref OrderFlowPrimaryCluster
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 90
+        MaxIdleConnectionsPercent: 30
+        ConnectionBorrowTimeout: 120
+
+Outputs:
+  GlobalClusterId:
+    Description: Aurora Global Database identifier.
+    Value: !Ref OrderFlowGlobalCluster
+  PrimaryWriterEndpoint:
+    Description: Direct Aurora primary writer endpoint.
+    Value: !GetAtt OrderFlowPrimaryCluster.Endpoint.Address
+  DbProxyEndpoint:
+    Description: TLS-enforced RDS Proxy endpoint for app pools.
+    Value: !GetAtt OrderFlowDbProxy.Endpoint

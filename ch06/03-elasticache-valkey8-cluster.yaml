@@ -1,0 +1,101 @@
+# OrderFlow Global - ElastiCache for Valkey 8.1 Graviton Cluster
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global Amazon ElastiCache for Valkey 8.1 ReplicationGroup
+  on Graviton cache.r8g.large with KMS, TLS, IAM RBAC, and Multi-AZ.
+
+Parameters:
+  ReplicationGroupId:
+    Type: String
+    Default: orderflow-valkey-cache
+    Description: Canonical Valkey replication group identifier.
+  CacheNodeType:
+    Type: String
+    Default: cache.r8g.large
+    AllowedValues:
+      - cache.r8g.large
+      - cache.r8g.xlarge
+      - cache.r7g.large
+    Description: Graviton4 memory-optimized ElastiCache node type.
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: Customer-managed KMS key ARN for at-rest encryption.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private cache subnets spanning multiple AZs.
+  CacheSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group restricting TCP 6379 to app workloads.
+
+Resources:
+  ValkeySubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      CacheSubnetGroupName: orderflow-valkey-subnets
+      Description: Private multi-AZ subnets for OrderFlow Valkey 8.1.
+      SubnetIds: !Ref PrivateSubnetIds
+
+  ValkeyParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      CacheParameterGroupFamily: valkey8
+      Description: OrderFlow Valkey 8.1 cluster-mode parameter group.
+      Properties:
+        cluster-enabled: 'yes'
+        maxmemory-policy: volatile-lru
+
+  ValkeyAppIamUser:
+    Type: AWS::ElastiCache::User
+    Properties:
+      Engine: valkey
+      UserId: orderflow-valkey-app
+      UserName: orderflow-valkey-app
+      AccessString: on ~* +@all -FLUSHALL -FLUSHDB
+      AuthenticationMode:
+        Type: iam
+
+  ValkeyAppUserGroup:
+    Type: AWS::ElastiCache::UserGroup
+    Properties:
+      Engine: valkey
+      UserGroupId: orderflow-valkey-iam-users
+      UserIds:
+        - !Ref ValkeyAppIamUser
+
+  OrderFlowValkeyCluster:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Ref ReplicationGroupId
+      ReplicationGroupDescription: >-
+        OrderFlow Valkey 8.1 Multi-AZ Graviton cache tier
+      Engine: valkey
+      EngineVersion: '8.1'
+      CacheNodeType: !Ref CacheNodeType
+      NumNodeGroups: 2
+      ReplicasPerNodeGroup: 1
+      AutomaticFailoverEnabled: true
+      MultiAZEnabled: true
+      CacheParameterGroupName: !Ref ValkeyParameterGroup
+      CacheSubnetGroupName: !Ref ValkeySubnetGroup
+      SecurityGroupIds:
+        - !Ref CacheSecurityGroupId
+      TransitEncryptionEnabled: true
+      TransitEncryptionMode: required
+      AtRestEncryptionEnabled: true
+      KmsKeyId: !Ref KmsKeyArn
+      SnapshotRetentionLimit: 7
+      SnapshotWindow: '03:00-04:00'
+      UserGroupIds:
+        - !Ref ValkeyAppUserGroup
+
+Outputs:
+  ConfigurationEndpointAddress:
+    Description: Valkey cluster configuration endpoint hostname.
+    Value: !GetAtt >-
+      OrderFlowValkeyCluster.ConfigurationEndPoint.Address
+  ConfigurationEndpointPort:
+    Description: Valkey TLS configuration endpoint port.
+    Value: !GetAtt >-
+      OrderFlowValkeyCluster.ConfigurationEndPoint.Port

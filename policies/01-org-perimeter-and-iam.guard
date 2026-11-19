@@ -1,0 +1,180 @@
+# 01-org-perimeter-and-iam.guard
+# OrderFlow Global AWS Platform - Org & IAM Guardrails (cfn-guard v3.2.1)
+# Copyright (c) 2026 Kien Nguyen. Licensed under Apache-2.0.
+
+let org_rcps = Resources.*[
+  Type == "AWS::Organizations::Policy"
+  Properties.Type == "RESOURCE_CONTROL_POLICY"
+]
+
+let iam_roles = Resources.*[
+  Type == "AWS::IAM::Role"
+]
+
+let role_props = %iam_roles.Properties
+
+let role_trust_allow = %role_props.AssumeRolePolicyDocument.Statement[
+  Effect == "Allow"
+]
+
+let trust_wildcard_str = %role_trust_allow[
+  Principal exists
+  Principal is_string
+  Principal == "*"
+]
+
+let trust_aws_str = %role_trust_allow[
+  Principal exists
+  Principal.AWS exists
+  Principal.AWS is_string
+  Principal.AWS == "*"
+]
+
+let trust_aws_list = %role_trust_allow[
+  Principal exists
+  Principal.AWS exists
+  Principal.AWS is_list
+  some Principal.AWS[*] == "*"
+]
+
+let role_inline_allow = %role_props.Policies[*].PolicyDocument.Statement[
+  Effect == "Allow"
+]
+
+let star_res_str_act_str = %role_inline_allow[
+  Resource exists
+  Resource is_string
+  Resource == "*"
+  Action exists
+  Action is_string
+]
+
+let star_res_str_act_list = %role_inline_allow[
+  Resource exists
+  Resource is_string
+  Resource == "*"
+  Action exists
+  Action is_list
+  Action !empty
+]
+
+let star_res_list_act_str = %role_inline_allow[
+  Resource exists
+  Resource is_list
+  some Resource[*] == "*"
+  Action exists
+  Action is_string
+]
+
+let star_res_list_act_list = %role_inline_allow[
+  Resource exists
+  Resource is_list
+  some Resource[*] == "*"
+  Action exists
+  Action is_list
+  Action !empty
+]
+
+rule ORG_RCP_REQUIRES_ORG_ID_CONDITION when %org_rcps !empty {
+  %org_rcps {
+    Properties.Content exists <<
+      RCP must define a Content policy document.
+    >>
+    Properties.Content.Statement exists <<
+      RCP Content must define Statement entries.
+    >>
+    some Properties.Content.Statement[*] {
+      Condition exists <<
+        RCP must include a Condition block for perimeter checks.
+      >>
+      Condition.*[
+        keys == /^(aws|AWS):(PrincipalOrgID|ResourceOrgID)$/
+      ] !empty <<
+        RCP must check aws:PrincipalOrgID or aws:ResourceOrgID.
+      >>
+    }
+  }
+}
+
+rule IAM_ROLE_TRUST_WILDCARD_STR_ORG when %trust_wildcard_str !empty {
+  %trust_wildcard_str {
+    Condition exists <<
+      Trust Principal "*" requires an organization Condition block.
+    >>
+    Condition.*[
+      keys == /^(aws|AWS):(PrincipalOrg(ID|Path)|ResourceOrgID)$/
+    ] !empty <<
+      Trust Principal "*" requires aws:PrincipalOrgID restriction.
+    >>
+  }
+}
+
+rule IAM_ROLE_TRUST_AWS_STR_ORG when %trust_aws_str !empty {
+  %trust_aws_str {
+    Condition exists <<
+      Trust Principal.AWS "*" requires an org Condition block.
+    >>
+    Condition.*[
+      keys == /^(aws|AWS):(PrincipalOrg(ID|Path)|ResourceOrgID)$/
+    ] !empty <<
+      Trust Principal.AWS "*" requires aws:PrincipalOrgID restriction.
+    >>
+  }
+}
+
+rule IAM_ROLE_TRUST_AWS_LIST_ORG when %trust_aws_list !empty {
+  %trust_aws_list {
+    Condition exists <<
+      Trust Principal.AWS list with "*" requires a Condition block.
+    >>
+    Condition.*[
+      keys == /^(aws|AWS):(PrincipalOrg(ID|Path)|ResourceOrgID)$/
+    ] !empty <<
+      Trust Principal.AWS with "*" requires aws:PrincipalOrgID.
+    >>
+  }
+}
+
+rule IAM_ROLE_NO_WILDCARD_ADMIN_STR when %star_res_str_act_str !empty {
+  %star_res_str_act_str {
+    Action != "*" <<
+      IAM role must not grant wildcard admin Action "*" on "*".
+    >>
+    Action != /^(?i)iam:(PassRole|\*)$/ <<
+      IAM role must not allow iam:PassRole or iam:* on Resource "*".
+    >>
+  }
+}
+
+rule IAM_ROLE_NO_WILDCARD_ADMIN_LIST when %star_res_str_act_list !empty {
+  %star_res_str_act_list {
+    Action[*] != "*" <<
+      IAM role must not grant wildcard admin Action "*" on "*".
+    >>
+    Action[*] != /^(?i)iam:(PassRole|\*)$/ <<
+      IAM role must not allow iam:PassRole or iam:* on Resource "*".
+    >>
+  }
+}
+
+rule IAM_ROLE_NO_RES_LIST_ADMIN_STR when %star_res_list_act_str !empty {
+  %star_res_list_act_str {
+    Action != "*" <<
+      IAM role must not grant wildcard admin Action "*" on "*".
+    >>
+    Action != /^(?i)iam:(PassRole|\*)$/ <<
+      IAM role must not allow iam:PassRole or iam:* on Resource "*".
+    >>
+  }
+}
+
+rule IAM_ROLE_NO_RES_LIST_ADMIN_LIST when %star_res_list_act_list !empty {
+  %star_res_list_act_list {
+    Action[*] != "*" <<
+      IAM role must not grant wildcard admin Action "*" on "*".
+    >>
+    Action[*] != /^(?i)iam:(PassRole|\*)$/ <<
+      IAM role must not allow iam:PassRole or iam:* on Resource "*".
+    >>
+  }
+}

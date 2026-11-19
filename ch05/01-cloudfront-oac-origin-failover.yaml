@@ -1,0 +1,189 @@
+# OrderFlow Global - CloudFront OAC (SigV4) & Multi-Origin Failover
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global CloudFront distribution using Origin Access Control
+  (SigV4, replacing legacy OAI), OriginGroup failover, and S3 policies.
+
+Parameters:
+  PrimaryBucketName:
+    Type: String
+    Default: orderflow-assets-111122223333
+    Description: Primary S3 bucket name in us-east-1.
+  SecondaryBucketName:
+    Type: String
+    Default: orderflow-assets-dr-111122223333
+    Description: Secondary DR S3 bucket name in eu-west-1.
+  PrimaryBucketRegion:
+    Type: String
+    Default: us-east-1
+    Description: Region of the primary S3 origin bucket.
+  SecondaryBucketRegion:
+    Type: String
+    Default: eu-west-1
+    Description: Region of the secondary DR S3 origin bucket.
+  WebAclArn:
+    Type: String
+    Description: AWS WAFv2 CLOUDFRONT WebACL ARN in us-east-1.
+  AcmCertificateArn:
+    Type: String
+    Description: ACM TLS certificate ARN in us-east-1 for custom domain.
+  DomainAlias:
+    Type: String
+    Default: cdn.orderflow-global.example.com
+    Description: Custom CNAME alias for orderflow-edge-cdn.
+
+Resources:
+  OrderFlowOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: orderflow-s3-oac-sigv4
+        Description: SigV4 OAC for OrderFlow S3 origins (replaces OAI).
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  OrderFlowDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: orderflow-edge-cdn
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        WebACLId: !Ref WebAclArn
+        Aliases:
+          - !Ref DomainAlias
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+        Origins:
+          - Id: PrimaryS3Origin
+            DomainName: !Sub >-
+              ${PrimaryBucketName}.s3.${PrimaryBucketRegion}.amazonaws.com
+            OriginAccessControlId: !GetAtt OrderFlowOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: SecondaryS3Origin
+            DomainName: !Join
+              - ''
+              - - !Ref SecondaryBucketName
+                - .s3.
+                - !Ref SecondaryBucketRegion
+                - .amazonaws.com
+            OriginAccessControlId: !GetAtt OrderFlowOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        OriginGroups:
+          Quantity: 1
+          Items:
+            - Id: OrderFlowAssetsOriginGroup
+              FailoverCriteria:
+                StatusCodes:
+                  Quantity: 4
+                  Items:
+                    - 500
+                    - 502
+                    - 503
+                    - 504
+              Members:
+                Quantity: 2
+                Items:
+                  - OriginId: PrimaryS3Origin
+                  - OriginId: SecondaryS3Origin
+        DefaultCacheBehavior:
+          TargetOriginId: OrderFlowAssetsOriginGroup
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          # AWS Managed CachingOptimized policy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+  PrimaryAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PrimaryBucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOacReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource:
+              !Sub 'arn:${AWS::Partition}:s3:::${PrimaryBucketName}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Join
+                  - ''
+                  - - 'arn:'
+                    - !Ref AWS::Partition
+                    - ':cloudfront::'
+                    - !Ref AWS::AccountId
+                    - ':distribution/'
+                    - !Ref OrderFlowDistribution
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${PrimaryBucketName}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${PrimaryBucketName}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # Apply equivalent policy to SecondaryBucketName in eu-west-1 DR stack.
+  SecondaryAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SecondaryBucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOacFailoverReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub >-
+              arn:${AWS::Partition}:s3:::${SecondaryBucketName}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Join
+                  - ''
+                  - - 'arn:'
+                    - !Ref AWS::Partition
+                    - ':cloudfront::'
+                    - !Ref AWS::AccountId
+                    - ':distribution/'
+                    - !Ref OrderFlowDistribution
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${SecondaryBucketName}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${SecondaryBucketName}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  OriginAccessControlId:
+    Description: CloudFront OAC ID replacing legacy OAI.
+    Value: !GetAtt OrderFlowOAC.Id
+  DistributionId:
+    Description: CloudFront distribution ID for orderflow-edge-cdn.
+    Value: !Ref OrderFlowDistribution
+  DistributionDomainName:
+    Description: CloudFront domain name for DNS CNAME/Alias binding.
+    Value: !GetAtt OrderFlowDistribution.DomainName

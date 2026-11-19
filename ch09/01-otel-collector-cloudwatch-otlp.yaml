@@ -1,0 +1,104 @@
+# OrderFlow Global ADOT / OpenTelemetry Collector Configuration
+# Author: Kien Nguyen | License: Apache-2.0
+#
+# Migrates telemetry pipelines off deprecated AWS X-Ray SDKs and Daemon
+# (maintenance mode Feb 25, 2026; End-of-Support Feb 25, 2027) onto
+# native CloudWatch OTLP endpoints, Transaction Search (aws/spans),
+# CloudWatch Logs, EMF, and CloudWatch PromQL OTLP metrics.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  sigv4auth/xray:
+    region: us-east-1
+    service: xray
+
+  sigv4auth/monitoring:
+    region: us-east-1
+    service: monitoring
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  resource:
+    attributes:
+      - key: service.namespace
+        value: orderflow
+        action: upsert
+      - key: cloud.provider
+        value: aws
+        action: upsert
+      - key: deployment.environment.name
+        value: prod
+        action: upsert
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  # Replaces retired awsxray exporter for OTLP trace ingestion
+  otlphttp/xray:
+    traces_endpoint: https://xray.us-east-1.amazonaws.com/v1/traces
+    compression: gzip
+    auth:
+      authenticator: sigv4auth/xray
+
+  # Structured span and trace log archive in CloudWatch Logs
+  awscloudwatchlogs:
+    region: us-east-1
+    log_group_name: /aws/ecs/orderflow/spans
+    log_stream_name: orderflow-otel-logs
+    log_retention: 30
+
+  # Embedded Metric Format (EMF) exporter for standard CW dashboards
+  awsemf:
+    region: us-east-1
+    namespace: OrderFlow/AWS
+    log_group_name: /aws/ecs/orderflow/emf
+    log_stream_name: orderflow-emf-stream
+    dimension_rollup_option: NoDimensionRollup
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Direct CloudWatch OTLP metrics ingestion for PromQL queries
+  otlphttp/metrics:
+    metrics_endpoint: >-
+      https://monitoring.us-east-1.amazonaws.com/v1/metrics
+    compression: gzip
+    auth:
+      authenticator: sigv4auth/monitoring
+
+service:
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
+  extensions:
+    - health_check
+    - sigv4auth/xray
+    - sigv4auth/monitoring
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/xray]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [awscloudwatchlogs]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [awsemf, otlphttp/metrics]

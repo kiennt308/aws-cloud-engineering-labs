@@ -1,0 +1,121 @@
+# OrderFlow Global - Route 53 Multi-Region Health Checks & Failover
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global Route 53 HTTPS health checks for us-east-1 and
+  eu-west-1 ALBs with latency and active-passive failover records.
+
+Parameters:
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Public Route 53 Hosted Zone ID for OrderFlow domain.
+  DomainName:
+    Type: String
+    Default: orderflow-global.example.com
+    Description: Root domain name managed in Route 53.
+  PrimaryAlbDnsName:
+    Type: String
+    Default: orderflow-alb-use1.us-east-1.elb.amazonaws.com
+    Description: Primary ALB DNS name in us-east-1.
+  PrimaryAlbHostedZoneId:
+    Type: String
+    Default: Z35SXDOTRQ7X7K
+    Description: Canonical ELB Hosted Zone ID for us-east-1 ALBs.
+  SecondaryAlbDnsName:
+    Type: String
+    Default: orderflow-alb-euw1.eu-west-1.elb.amazonaws.com
+    Description: Secondary DR ALB DNS name in eu-west-1.
+  SecondaryAlbHostedZoneId:
+    Type: String
+    Default: Z32O12XQLNTSW2
+    Description: Canonical ELB Hosted Zone ID for eu-west-1 ALBs.
+  HealthCheckPath:
+    Type: String
+    Default: /healthz
+    Description: Shallow health endpoint path returning HTTP 200.
+
+Resources:
+  PrimaryAlbHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        Port: 443
+        FullyQualifiedDomainName: !Ref PrimaryAlbDnsName
+        ResourcePath: !Ref HealthCheckPath
+        RequestInterval: 10
+        FailureThreshold: 3
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: orderflow-use1-alb-hc
+        - Key: Region
+          Value: us-east-1
+
+  SecondaryAlbHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        Port: 443
+        FullyQualifiedDomainName: !Ref SecondaryAlbDnsName
+        ResourcePath: !Ref HealthCheckPath
+        RequestInterval: 10
+        FailureThreshold: 3
+        EnableSNI: true
+      HealthCheckTags:
+        - Key: Name
+          Value: orderflow-euw1-alb-hc
+        - Key: Region
+          Value: eu-west-1
+
+  OrderFlowGlobalRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Comment: Latency-based API and active-passive checkout DNS records.
+      RecordSets:
+        - Name: !Sub 'api.${DomainName}'
+          Type: A
+          SetIdentifier: api-latency-us-east-1
+          Region: us-east-1
+          HealthCheckId: !Ref PrimaryAlbHealthCheck
+          AliasTarget:
+            HostedZoneId: !Ref PrimaryAlbHostedZoneId
+            DNSName: !Ref PrimaryAlbDnsName
+            EvaluateTargetHealth: true
+        - Name: !Sub 'api.${DomainName}'
+          Type: A
+          SetIdentifier: api-latency-eu-west-1
+          Region: eu-west-1
+          HealthCheckId: !Ref SecondaryAlbHealthCheck
+          AliasTarget:
+            HostedZoneId: !Ref SecondaryAlbHostedZoneId
+            DNSName: !Ref SecondaryAlbDnsName
+            EvaluateTargetHealth: true
+        - Name: !Sub 'checkout.${DomainName}'
+          Type: A
+          SetIdentifier: checkout-failover-primary
+          Failover: PRIMARY
+          HealthCheckId: !Ref PrimaryAlbHealthCheck
+          AliasTarget:
+            HostedZoneId: !Ref PrimaryAlbHostedZoneId
+            DNSName: !Ref PrimaryAlbDnsName
+            EvaluateTargetHealth: true
+        - Name: !Sub 'checkout.${DomainName}'
+          Type: A
+          SetIdentifier: checkout-failover-secondary
+          Failover: SECONDARY
+          HealthCheckId: !Ref SecondaryAlbHealthCheck
+          AliasTarget:
+            HostedZoneId: !Ref SecondaryAlbHostedZoneId
+            DNSName: !Ref SecondaryAlbDnsName
+            EvaluateTargetHealth: true
+
+Outputs:
+  PrimaryHealthCheckId:
+    Description: Route 53 HealthCheck ID for us-east-1 ALB.
+    Value: !Ref PrimaryAlbHealthCheck
+  SecondaryHealthCheckId:
+    Description: Route 53 HealthCheck ID for eu-west-1 ALB.
+    Value: !Ref SecondaryAlbHealthCheck

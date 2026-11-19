@@ -1,0 +1,116 @@
+{
+  "version": "2021.12",
+  "core-network-configuration": {
+    "vpn-ecmp-support": true,
+    "dns-support": true,
+    "asn-ranges": [
+      "64512-64555"
+    ],
+    "edge-locations": [
+      {
+        "location": "us-east-1",
+        "asn": 64512
+      },
+      {
+        "location": "eu-west-1",
+        "asn": 64513
+      }
+    ]
+  },
+  "segments": [
+    {
+      "name": "prod",
+      "description": "Isolated production OrderFlow workloads",
+      "require-attachment-acceptance": true,
+      "isolate-attachments": false,
+      "edge-locations": [
+        "us-east-1",
+        "eu-west-1"
+      ]
+    },
+    {
+      "name": "nonprod",
+      "description": "Isolated staging and test workloads",
+      "require-attachment-acceptance": false,
+      "isolate-attachments": false,
+      "edge-locations": [
+        "us-east-1",
+        "eu-west-1"
+      ]
+    },
+    {
+      "name": "shared",
+      "description": "Shared OCI, DNS, and observability services",
+      "require-attachment-acceptance": true,
+      "isolate-attachments": false,
+      "edge-locations": [
+        "us-east-1",
+        "eu-west-1"
+      ]
+    }
+  ],
+  "segment-actions": [
+    {
+      "action": "share",
+      "mode": "attachment-route",
+      "segment": "shared",
+      "share-with": [
+        "prod",
+        "nonprod"
+      ]
+    }
+  ],
+  "attachment-policies": [
+    {
+      "rule-number": 100,
+      "condition-logic": "and",
+      "conditions": [
+        {
+          "type": "tag-value",
+          "operator": "equals",
+          "key": "env",
+          "value": "prod"
+        }
+      ],
+      "action": {
+        "association-method": "constant",
+        "segment": "prod",
+        "require-acceptance": true
+      }
+    },
+    {
+      "rule-number": 200,
+      "condition-logic": "and",
+      "conditions": [
+        {
+          "type": "tag-value",
+          "operator": "equals",
+          "key": "env",
+          "value": "nonprod"
+        }
+      ],
+      "action": {
+        "association-method": "constant",
+        "segment": "nonprod",
+        "require-acceptance": false
+      }
+    },
+    {
+      "rule-number": 300,
+      "condition-logic": "and",
+      "conditions": [
+        {
+          "type": "tag-value",
+          "operator": "equals",
+          "key": "env",
+          "value": "shared"
+        }
+      ],
+      "action": {
+        "association-method": "constant",
+        "segment": "shared",
+        "require-acceptance": true
+      }
+    }
+  ]
+}

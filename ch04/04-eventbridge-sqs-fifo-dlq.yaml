@@ -1,0 +1,110 @@
+# OrderFlow Global - EventBridge Bus, SQS FIFO, DLQ & QueuePolicy
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global asynchronous checkout decoupling via custom
+  EventBridge bus, KMS-encrypted SQS FIFO queue, DLQ, and Rule.
+
+Parameters:
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: KMS key ARN encrypting SQS queues and EventBridge bus.
+  EventBusName:
+    Type: String
+    Default: orderflow-orders-bus
+    Description: Custom EventBridge event bus name.
+
+Resources:
+  OrderSubmittedDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orderflow-orders-dlq.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      DeduplicationScope: messageGroup
+      FifoThroughputLimit: perMessageGroupId
+      KmsMasterKeyId: !Ref KmsKeyArn
+      MessageRetentionPeriod: 1209600
+
+  OrderSubmittedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orderflow-orders.fifo
+      FifoQueue: true
+      # Explicit MessageDeduplicationId required from producers/Pipes.
+      ContentBasedDeduplication: false
+      DeduplicationScope: messageGroup
+      FifoThroughputLimit: perMessageGroupId
+      KmsMasterKeyId: !Ref KmsKeyArn
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderSubmittedDlq.Arn
+        maxReceiveCount: 3
+
+  OrderFlowEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Ref EventBusName
+      KmsKeyIdentifier: !Ref KmsKeyArn
+
+  OrderSubmittedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: orderflow-route-order-submitted
+      Description: Route OrderSubmitted checkout events to SQS FIFO.
+      EventBusName: !Ref OrderFlowEventBus
+      State: ENABLED
+      EventPattern:
+        source:
+          - orderflow.checkout
+        detail-type:
+          - OrderSubmitted
+      Targets:
+        - Id: OrderSubmittedFifoTarget
+          Arn: !GetAtt OrderSubmittedQueue.Arn
+          SqsParameters:
+            MessageGroupId: orderflow-orders-v1
+          DeadLetterConfig:
+            Arn: !GetAtt OrderSubmittedDlq.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 3
+
+  OrderSubmittedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref OrderSubmittedQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeRuleSendMessage
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt OrderSubmittedQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt OrderSubmittedRule.Arn
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 'sqs:*'
+            Resource: !GetAtt OrderSubmittedQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  EventBusArn:
+    Description: ARN of the custom orderflow-orders-bus EventBus.
+    Value: !GetAtt OrderFlowEventBus.Arn
+  PrimaryQueueUrl:
+    Description: URL of the primary orderflow-orders.fifo queue.
+    Value: !Ref OrderSubmittedQueue
+  DlqArn:
+    Description: ARN of the orderflow-orders-dlq.fifo dead-letter queue.
+    Value: !GetAtt OrderSubmittedDlq.Arn

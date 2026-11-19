@@ -1,0 +1,227 @@
+# OrderFlow Global - Multi-Region VPC IPAM and Prod VPC Topology
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Multi-region AWS VPC IPAM (10.0.0.0/8) with us-east-1 (10.16.0.0/12)
+  and eu-west-1 (10.32.0.0/12) child pools plus OrderFlowProdVPC
+  (10.16.0.0/16) and 3-AZ private app and data subnets.
+
+Resources:
+  OrderFlowIpam:
+    Type: AWS::EC2::IPAM
+    Properties:
+      Description: OrderFlow Global enterprise IPAM across active regions.
+      Tier: advanced
+      OperatingRegions:
+        - RegionName: us-east-1
+        - RegionName: eu-west-1
+      Tags:
+        - Key: Name
+          Value: orderflow-global-ipam
+
+  TopLevelIpamPool:
+    Type: AWS::EC2::IPAMPool
+    Properties:
+      IpamScopeId: !GetAtt OrderFlowIpam.PrivateDefaultScopeId
+      AddressFamily: ipv4
+      Description: OrderFlow Global top-level 10.0.0.0/8 RFC1918 pool.
+      ProvisionedCidrs:
+        - Cidr: 10.0.0.0/8
+      Tags:
+        - Key: Name
+          Value: orderflow-root-pool
+
+  UsEast1IpamPool:
+    Type: AWS::EC2::IPAMPool
+    Properties:
+      IpamScopeId: !GetAtt OrderFlowIpam.PrivateDefaultScopeId
+      SourceIpamPoolId: !Ref TopLevelIpamPool
+      AddressFamily: ipv4
+      Locale: us-east-1
+      Description: Primary us-east-1 regional IPAM allocation pool.
+      ProvisionedCidrs:
+        - Cidr: 10.16.0.0/12
+      AllocationDefaultNetmaskLength: 16
+      AllocationMinNetmaskLength: 16
+      AllocationMaxNetmaskLength: 24
+      Tags:
+        - Key: Name
+          Value: orderflow-us-east-1-pool
+
+  EuWest1IpamPool:
+    Type: AWS::EC2::IPAMPool
+    Properties:
+      IpamScopeId: !GetAtt OrderFlowIpam.PrivateDefaultScopeId
+      SourceIpamPoolId: !Ref TopLevelIpamPool
+      AddressFamily: ipv4
+      Locale: eu-west-1
+      Description: Secondary eu-west-1 DR regional IPAM allocation pool.
+      ProvisionedCidrs:
+        - Cidr: 10.32.0.0/12
+      AllocationDefaultNetmaskLength: 16
+      AllocationMinNetmaskLength: 16
+      AllocationMaxNetmaskLength: 24
+      Tags:
+        - Key: Name
+          Value: orderflow-eu-west-1-pool
+
+  OrderFlowProdVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      Ipv4IpamPoolId: !Ref UsEast1IpamPool
+      Ipv4NetmaskLength: 16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: OrderFlowProdVPC
+        - Key: Environment
+          Value: prod
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OrderFlowProdVPC
+      Tags:
+        - Key: Name
+          Value: orderflow-prod-private-rt
+
+  PrivateAppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrderFlowProdVPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select
+        - 0
+        - !Cidr [!GetAtt OrderFlowProdVPC.CidrBlock, 6, 12]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: orderflow-prod-app-a
+        - Key: Tier
+          Value: app
+
+  PrivateAppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrderFlowProdVPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select
+        - 1
+        - !Cidr [!GetAtt OrderFlowProdVPC.CidrBlock, 6, 12]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: orderflow-prod-app-b
+        - Key: Tier
+          Value: app
+
+  PrivateAppSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrderFlowProdVPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Select
+        - 2
+        - !Cidr [!GetAtt OrderFlowProdVPC.CidrBlock, 6, 12]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: orderflow-prod-app-c
+        - Key: Tier
+          Value: app
+
+  PrivateDataSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrderFlowProdVPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select
+        - 3
+        - !Cidr [!GetAtt OrderFlowProdVPC.CidrBlock, 6, 12]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: orderflow-prod-data-a
+        - Key: Tier
+          Value: data
+
+  PrivateDataSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrderFlowProdVPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select
+        - 4
+        - !Cidr [!GetAtt OrderFlowProdVPC.CidrBlock, 6, 12]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: orderflow-prod-data-b
+        - Key: Tier
+          Value: data
+
+  PrivateDataSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OrderFlowProdVPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Select
+        - 5
+        - !Cidr [!GetAtt OrderFlowProdVPC.CidrBlock, 6, 12]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: orderflow-prod-data-c
+        - Key: Tier
+          Value: data
+
+  AppSubnetAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  AppSubnetAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  AppSubnetAssocC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnetC
+      RouteTableId: !Ref PrivateRouteTable
+
+  DataSubnetAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateDataSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  DataSubnetAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateDataSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  DataSubnetAssocC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateDataSubnetC
+      RouteTableId: !Ref PrivateRouteTable
+
+Outputs:
+  OrderFlowIpamId:
+    Description: Global VPC IPAM identifier.
+    Value: !Ref OrderFlowIpam
+  ProdVpcId:
+    Description: Production VPC ID allocated from us-east-1 IPAM pool.
+    Value: !Ref OrderFlowProdVPC
+  ProdVpcCidr:
+    Description: Production VPC CIDR block (10.16.0.0/16).
+    Value: !GetAtt OrderFlowProdVPC.CidrBlock
+  PrivateRouteTableId:
+    Description: Private route table shared by app and data subnets.
+    Value: !Ref PrivateRouteTable

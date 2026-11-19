@@ -1,0 +1,98 @@
+# 04-observability-and-resilience.guard
+# OrderFlow Global AWS Platform — Observability & Resilience Guardrails
+# Target: cfn-guard v3.2.1
+# Copyright (c) 2026 Kien Nguyen. Licensed under Apache-2.0.
+#
+# Explicit SQS suppressions (via Metadata.guard.SuppressedRules):
+#   - SQS_QUEUE_KMS_ENCRYPTION: allow queue without KmsMasterKeyId
+#   - SQS_PRIMARY_REDRIVE_POLICY: allow DLQ queue without RedrivePolicy
+
+let fis_templates = Resources.*[
+  Type == "AWS::FIS::ExperimentTemplate"
+]
+
+let sqs_kms_queues = Resources.*[
+  Type == "AWS::SQS::Queue"
+  Metadata.guard.SuppressedRules not exists or
+  Metadata.guard.SuppressedRules empty or
+  Metadata.guard.SuppressedRules[*] != "SQS_QUEUE_KMS_ENCRYPTION"
+]
+
+let sqs_primary_queues = Resources.*[
+  Type == "AWS::SQS::Queue"
+  Properties.QueueName not exists or
+  Properties.QueueName is_struct or
+  Properties.QueueName != /(?i)(^|[-_])(dlq|dead[-_]?letter)([-_.]|$)/
+  Metadata.guard.SuppressedRules not exists or
+  Metadata.guard.SuppressedRules empty or
+  Metadata.guard.SuppressedRules[*] != "SQS_PRIMARY_REDRIVE_POLICY"
+]
+
+let cw_log_groups = Resources.*[
+  Type == "AWS::Logs::LogGroup"
+]
+
+rule FIS_TEMPLATE_STOP_CONDITIONS when %fis_templates !empty {
+  %fis_templates.Properties {
+    StopConditions exists
+    StopConditions is_list
+    StopConditions !empty <<
+      FIS ExperimentTemplate must define non-empty StopConditions.
+    >>
+    StopConditions[*] {
+      Source exists
+      Source !empty <<
+        Every FIS StopCondition must declare a non-empty Source.
+      >>
+    }
+  }
+}
+
+rule FIS_TEMPLATE_EXPLICIT_TAG_TARGETS when %fis_templates !empty {
+  %fis_templates.Properties {
+    Targets exists
+    Targets is_struct
+    Targets !empty <<
+      FIS ExperimentTemplate must define explicit Targets.
+    >>
+    Targets.* {
+      ResourceTags exists
+      ResourceTags is_struct
+      ResourceTags !empty <<
+        FIS Targets must scope blast radius via explicit ResourceTags.
+      >>
+    }
+  }
+}
+
+rule SQS_QUEUE_KMS_ENCRYPTION when %sqs_kms_queues !empty {
+  %sqs_kms_queues.Properties {
+    KmsMasterKeyId exists
+    KmsMasterKeyId !empty <<
+      SQS queue must configure KmsMasterKeyId unless explicitly skipped.
+    >>
+  }
+}
+
+rule SQS_PRIMARY_REDRIVE_POLICY when %sqs_primary_queues !empty {
+  %sqs_primary_queues.Properties {
+    RedrivePolicy exists <<
+      Primary SQS queue must define RedrivePolicy with a DLQ target.
+    >>
+    RedrivePolicy.deadLetterTargetArn exists
+    RedrivePolicy.deadLetterTargetArn !empty <<
+      SQS RedrivePolicy must specify a non-empty deadLetterTargetArn.
+    >>
+  }
+}
+
+rule CW_LOG_GROUP_RETENTION_MIN_30_DAYS when %cw_log_groups !empty {
+  %cw_log_groups.Properties {
+    RetentionInDays exists <<
+      CloudWatch LogGroup must set RetentionInDays >= 30.
+    >>
+    RetentionInDays >= 30 <<
+      CloudWatch LogGroup RetentionInDays must be at least 30 days.
+    >>
+  }
+}

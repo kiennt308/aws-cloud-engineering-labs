@@ -1,0 +1,172 @@
+# 02-network-and-edge.guard
+# OrderFlow Global AWS Platform — Edge & Network Guardrails (cfn-guard)
+# Target: cfn-guard v3.2.1
+# Copyright (c) 2026 Kien Nguyen. Licensed under Apache-2.0.
+
+let cf_dists = Resources.*[
+  Type == "AWS::CloudFront::Distribution"
+]
+
+let cf_dist_cfgs = %cf_dists.Properties.DistributionConfig
+
+let cf_s3_origins = %cf_dist_cfgs.Origins[
+  S3OriginConfig exists
+]
+
+let cf_legacy_oai = %cf_s3_origins[
+  S3OriginConfig.OriginAccessIdentity exists
+  S3OriginConfig.OriginAccessIdentity !empty
+]
+
+let cf_cache_behaviors = %cf_dist_cfgs.CacheBehaviors[*]
+
+let allowed_tls_policies = [
+  "TLSv1.2_2021",
+  "TLSv1.2_2025",
+  "TLSv1.3_2025"
+]
+
+let ec2_sgs = Resources.*[
+  Type == "AWS::EC2::SecurityGroup"
+]
+
+let sg_public_rules = %ec2_sgs.Properties.SecurityGroupIngress[
+  CidrIp exists
+  CidrIp == "0.0.0.0/0"
+]
+
+let sg_public_ports = %sg_public_rules[
+  FromPort is_int
+  ToPort is_int
+]
+
+let sg_ingress_res = Resources.*[
+  Type == "AWS::EC2::SecurityGroupIngress"
+  Properties.CidrIp exists
+  Properties.CidrIp == "0.0.0.0/0"
+]
+
+let sg_ingress_res_ports = %sg_ingress_res[
+  Properties.FromPort is_int
+  Properties.ToPort is_int
+]
+
+rule CF_DIST_REQUIRES_OAC when %cf_dists !empty {
+  %cf_dists {
+    Properties.DistributionConfig exists <<
+      CloudFront distribution must define DistributionConfig.
+    >>
+    Properties.DistributionConfig.Origins exists
+    Properties.DistributionConfig.Origins !empty <<
+      CloudFront DistributionConfig must define Origins.
+    >>
+    some Properties.DistributionConfig.Origins[*] {
+      OriginAccessControlId exists
+      OriginAccessControlId !empty <<
+        CloudFront distribution must configure OriginAccessControlId.
+      >>
+    }
+  }
+}
+
+rule CF_S3_ORIGIN_REQUIRES_OAC when %cf_s3_origins !empty {
+  %cf_s3_origins {
+    OriginAccessControlId exists
+    OriginAccessControlId !empty <<
+      Every CloudFront S3 origin must define OriginAccessControlId.
+    >>
+  }
+}
+
+rule CF_FORBID_LEGACY_OAI when %cf_legacy_oai !empty {
+  %cf_legacy_oai empty <<
+    Legacy S3OriginConfig.OriginAccessIdentity is forbidden; use OAC.
+  >>
+}
+
+rule CF_DEFAULT_CACHE_HTTPS when %cf_dist_cfgs !empty {
+  %cf_dist_cfgs.DefaultCacheBehavior {
+    ViewerProtocolPolicy exists
+    ViewerProtocolPolicy IN ["redirect-to-https", "https-only"] <<
+      ViewerProtocolPolicy must be redirect-to-https or https-only.
+    >>
+  }
+}
+
+rule CF_CACHE_BEHAVIORS_HTTPS when %cf_cache_behaviors !empty {
+  %cf_cache_behaviors {
+    ViewerProtocolPolicy exists
+    ViewerProtocolPolicy IN ["redirect-to-https", "https-only"] <<
+      CacheBehavior ViewerProtocolPolicy must enforce HTTPS.
+    >>
+  }
+}
+
+rule CF_VIEWER_TLS_MIN_2021 when %cf_dist_cfgs !empty {
+  %cf_dist_cfgs {
+    ViewerCertificate exists <<
+      CloudFront distribution must define ViewerCertificate.
+    >>
+    ViewerCertificate.MinimumProtocolVersion exists <<
+      ViewerCertificate must set MinimumProtocolVersion >= TLSv1.2_2021.
+    >>
+    ViewerCertificate {
+      MinimumProtocolVersion IN %allowed_tls_policies or
+      MinimumProtocolVersion == /^TLSv1\.[23]_20(2[1-9]|[3-9][0-9])$/ <<
+        MinimumProtocolVersion must be TLSv1.2_2021 or newer.
+      >>
+    }
+  }
+}
+
+rule SG_FORBID_ALL_TRAFFIC_PUBLIC when %sg_public_rules !empty {
+  %sg_public_rules {
+    IpProtocol != "-1"
+    IpProtocol != -1 <<
+      SecurityGroup ingress 0.0.0.0/0 must not allow all protocols (-1).
+    >>
+  }
+}
+
+rule SG_FORBID_SENSITIVE_PUBLIC_PORTS when %sg_public_ports !empty {
+  %sg_public_ports {
+    FromPort > 22 or ToPort < 22 <<
+      SecurityGroup must not expose port 22 (SSH) to 0.0.0.0/0.
+    >>
+    FromPort > 3389 or ToPort < 3389 <<
+      SecurityGroup must not expose port 3389 (RDP) to 0.0.0.0/0.
+    >>
+    FromPort > 5432 or ToPort < 5432 <<
+      SecurityGroup must not expose port 5432 (Postgres) to 0.0.0.0/0.
+    >>
+    FromPort > 6379 or ToPort < 6379 <<
+      SecurityGroup must not expose port 6379 (Valkey) to 0.0.0.0/0.
+    >>
+  }
+}
+
+rule SG_INGRESS_FORBID_ALL_PUBLIC when %sg_ingress_res !empty {
+  %sg_ingress_res.Properties {
+    IpProtocol != "-1"
+    IpProtocol != -1 <<
+      SecurityGroupIngress 0.0.0.0/0 must not allow all protocols (-1).
+    >>
+  }
+}
+
+rule SG_INGRESS_FORBID_SENSITIVE_PORTS when %sg_ingress_res_ports !empty {
+  %sg_ingress_res_ports.Properties {
+    FromPort > 22 or ToPort < 22 <<
+      SecurityGroupIngress must not expose port 22 (SSH) to 0.0.0.0/0.
+    >>
+    FromPort > 3389 or ToPort < 3389 <<
+      SecurityGroupIngress must not expose port 3389 (RDP) to 0.0.0.0/0.
+    >>
+    FromPort > 5432 or ToPort < 5432 <<
+      SecurityGroupIngress must not expose port 5432 to 0.0.0.0/0.
+    >>
+    FromPort > 6379 or ToPort < 6379 <<
+      SecurityGroupIngress must not expose port 6379 to 0.0.0.0/0.
+    >>
+  }
+}

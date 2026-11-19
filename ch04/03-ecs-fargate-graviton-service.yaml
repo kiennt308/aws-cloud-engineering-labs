@@ -1,0 +1,145 @@
+# OrderFlow Global - Hardened ECS Fargate ARM64 (Graviton) Service
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global ECS Fargate service on Linux ARM64 with read-only
+  root filesystem, dropped capabilities, and CloudWatch log routing.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: orderflow-prod-ecs
+    Description: ECS cluster name.
+  ImageUri:
+    Type: String
+    Description: Immutable ECR image URI with explicit release tag.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets across three AZs (no public IPs).
+  ServiceSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group restricting task ingress to ALB only.
+  TargetGroupArn:
+    Type: String
+    Description: ALB target group ARN for order-service port 8080.
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: KMS key ARN encrypting ECS CloudWatch logs.
+  ExecutionRoleArn:
+    Type: String
+    Description: ECS task execution IAM role ARN (ECR pull and logs).
+  TaskRoleArn:
+    Type: String
+    Description: Least-privilege IAM role ARN assumed by app container.
+
+Resources:
+  OrderServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/orderflow/order-service
+      RetentionInDays: 90
+      KmsKeyId: !Ref KmsKeyArn
+
+  OrderFlowCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced
+
+  OrderServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: orderflow-order-service
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: '1024'
+      Memory: '2048'
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      TaskRoleArn: !Ref TaskRoleArn
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      Volumes:
+        - Name: tmp-ephemeral
+      ContainerDefinitions:
+        - Name: order-service
+          Image: !Ref ImageUri
+          Essential: true
+          User: '10001:10001'
+          Privileged: false
+          ReadonlyRootFilesystem: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+              Name: http
+          LinuxParameters:
+            InitProcessEnabled: true
+            Capabilities:
+              Drop:
+                - ALL
+          MountPoints:
+            - SourceVolume: tmp-ephemeral
+              ContainerPath: /tmp
+              ReadOnly: false
+          Environment:
+            - Name: OTEL_SERVICE_NAME
+              Value: orderflow-order-service
+            - Name: OTEL_EXPORTER_OTLP_ENDPOINT
+              Value: !Sub >-
+                https://monitoring.${AWS::Region}.amazonaws.com
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -sf http://localhost:8080/healthz || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 15
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OrderServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  OrderService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: orderflow-order-service
+      Cluster: !Ref OrderFlowCluster
+      TaskDefinition: !Ref OrderServiceTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DesiredCount: 3
+      EnableExecuteCommand: false
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups:
+            - !Ref ServiceSecurityGroupId
+      LoadBalancers:
+        - ContainerName: order-service
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroupArn
+
+Outputs:
+  ClusterArn:
+    Description: ARN of the OrderFlow ECS cluster.
+    Value: !GetAtt OrderFlowCluster.Arn
+  TaskDefinitionArn:
+    Description: ARN of the ARM64 Fargate task definition.
+    Value: !Ref OrderServiceTaskDefinition
+  ServiceArn:
+    Description: ARN of the OrderFlow Fargate service.
+    Value: !Ref OrderService

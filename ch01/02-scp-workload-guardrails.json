@@ -1,0 +1,63 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyUnapprovedRegionsWithGlobalExemptions",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "cloudfront:*",
+        "route53:*",
+        "route53domains:*",
+        "organizations:*",
+        "account:*",
+        "billing:*",
+        "budgets:*",
+        "ce:*",
+        "support:*",
+        "health:*",
+        "shield:*",
+        "waf:*",
+        "globalaccelerator:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": [
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyDisablingCloudTrailGuardDutyAndBackup",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:UpdateTrail",
+        "guardduty:DeleteDetector",
+        "guardduty:UpdateDetector",
+        "guardduty:DisassociateFromAdministratorAccount",
+        "backup:DeleteBackupVault",
+        "backup:DeleteBackupVaultLockConfiguration",
+        "backup:DeleteRecoveryPoint",
+        "backup:PutBackupVaultAccessPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyEc2RunInstancesWithoutIMDSv2",
+      "Effect": "Deny",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringNotEquals": {
+          "ec2:MetadataHttpTokens": "required"
+        }
+      }
+    }
+  ]
+}

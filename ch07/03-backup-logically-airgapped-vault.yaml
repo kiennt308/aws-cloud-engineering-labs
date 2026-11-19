@@ -1,0 +1,98 @@
+# OrderFlow Global - AWS Backup Logically Air-Gapped Vault & Plan
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global immutable AWS Backup LogicallyAirGappedBackupVault
+  protecting BackupTier=Critical Aurora, EBS, and EFS resources.
+
+Parameters:
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: KMS MRK ARN encrypting air-gapped recovery points.
+  VaultName:
+    Type: String
+    Default: orderflow-airgapped-vault
+    Description: Canonical logically air-gapped backup vault name.
+  MinRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 7
+    Description: Minimum immutable retention lock period in days.
+  MaxRetentionDays:
+    Type: Number
+    Default: 90
+    MaxValue: 36500
+    Description: Maximum allowed retention period in days.
+
+Resources:
+  # Share this vault cross-account via AWS RAM (AWS::RAM::ResourceShare)
+  # to orderflow-audit so isolated recovery bypasses compromised admins.
+  OrderFlowAirGappedVault:
+    Type: AWS::Backup::LogicallyAirGappedBackupVault
+    Properties:
+      BackupVaultName: !Ref VaultName
+      MinRetentionDays: !Ref MinRetentionDays
+      MaxRetentionDays: !Ref MaxRetentionDays
+      EncryptionKeyArn: !Ref KmsKeyArn
+      BackupVaultTags:
+        Environment: prod
+        DataTier: critical
+
+  BackupServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Join
+          - ''
+          - - 'arn:'
+            - !Ref AWS::Partition
+            - ':iam::aws:policy/service-role/'
+            - AWSBackupServiceRolePolicyForBackup
+        - !Join
+          - ''
+          - - 'arn:'
+            - !Ref AWS::Partition
+            - ':iam::aws:policy/service-role/'
+            - AWSBackupServiceRolePolicyForRestores
+
+  CriticalAirGappedBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: orderflow-critical-airgapped-plan
+        BackupPlanRule:
+          - RuleName: DailyCriticalAirGappedCopy
+            TargetBackupVault: !Ref OrderFlowAirGappedVault
+            ScheduleExpression: 'cron(0 3 ? * * *)'
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            Lifecycle:
+              DeleteAfterDays: 35
+
+  CriticalTaggedSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref CriticalAirGappedBackupPlan
+      BackupSelection:
+        SelectionName: orderflow-critical-tag-selection
+        IamRoleArn: !GetAtt BackupServiceRole.Arn
+        ListOfTags:
+          - ConditionType: STRINGEQUALS
+            ConditionKey: BackupTier
+            ConditionValue: Critical
+
+Outputs:
+  AirGappedVaultArn:
+    Description: ARN of orderflow-airgapped-vault.
+    Value: !GetAtt OrderFlowAirGappedVault.BackupVaultArn
+  BackupPlanId:
+    Description: ID of the critical daily backup plan.
+    Value: !Ref CriticalAirGappedBackupPlan

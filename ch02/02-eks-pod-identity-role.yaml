@@ -1,0 +1,125 @@
+# OrderFlow Global - EKS Pod Identity Role and Association
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Least-privilege IAM role trusting pods.eks.amazonaws.com and EKS
+  PodIdentityAssociation for order-service in orderflow-prod.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: orderflow-prod-eks
+    Description: Target EKS cluster name.
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - staging
+    Description: Target OrderFlow environment slug.
+  OrderAssetsBucketName:
+    Type: String
+    Default: orderflow-assets-111122223333
+    Description: S3 bucket name for order payload objects.
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: KMS customer-managed key ARN for S3 and secrets.
+  PermissionBoundaryArn:
+    Type: String
+    Default: ''
+    Description: Optional IAM permission boundary ARN to enforce.
+
+Conditions:
+  HasPermissionBoundary: !Not
+    - !Equals
+      - !Ref PermissionBoundaryArn
+      - ''
+
+Resources:
+  OrderFlowPodIdentityRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'orderflow-${EnvironmentName}-order-service-pod'
+      Description: >
+        EKS Pod Identity role for order-service workload with scoped
+        S3, Secrets Manager, and KMS ViaService access.
+      PermissionsBoundary: !If
+        - HasPermissionBoundary
+        - !Ref PermissionBoundaryArn
+        - !Ref 'AWS::NoValue'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEksPodIdentityAssumeAndTag
+            Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:TagSession'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+      Policies:
+        - PolicyName: OrderServiceLeastPrivilege
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadWriteOrderArtifacts
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                Resource: !Sub >-
+                  arn:aws:s3:::${OrderAssetsBucketName}/orders/*
+              - Sid: ReadOrderDatabaseSecret
+                Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Join
+                  - ''
+                  - - 'arn:aws:secretsmanager:'
+                    - !Ref 'AWS::Region'
+                    - ':'
+                    - !Ref 'AWS::AccountId'
+                    - ':secret:orderflow/'
+                    - !Ref EnvironmentName
+                    - '/db-*'
+              - Sid: DecryptViaApprovedAwsServices
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    'kms:ViaService':
+                      - !Sub 's3.${AWS::Region}.amazonaws.com'
+                      - !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
+      Tags:
+        - Key: Service
+          Value: order-service
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  OrderServicePodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Ref ClusterName
+      Namespace: orderflow-prod
+      ServiceAccount: order-service
+      RoleArn: !GetAtt OrderFlowPodIdentityRole.Arn
+      Tags:
+        - Key: Service
+          Value: order-service
+        - Key: Namespace
+          Value: orderflow-prod
+
+Outputs:
+  PodIdentityRoleArn:
+    Description: ARN of the EKS Pod Identity role for order-service.
+    Value: !GetAtt OrderFlowPodIdentityRole.Arn
+  PodIdentityAssociationArn:
+    Description: ARN of the EKS PodIdentityAssociation.
+    Value: !GetAtt OrderServicePodIdentityAssociation.AssociationArn

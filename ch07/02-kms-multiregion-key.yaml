@@ -1,0 +1,156 @@
+# OrderFlow Global - AWS KMS Multi-Region Key (mrk-*) & Replica
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global KMS Multi-Region Key (alias/orderflow-data-mrk)
+  with org perimeter, CloudFront OAC, S3, and Backup access.
+
+Parameters:
+  OrganizationId:
+    Type: String
+    Default: o-orderflow1
+    AllowedPattern: ^o-[a-z0-9]{10,32}$
+    Description: AWS Organizations ID enforcing KMS key perimeter.
+  PrimaryKeyArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Leave empty in us-east-1 (creates primary MRK). Set to primary
+      mrk-* ARN when deploying the replica in eu-west-1.
+
+Conditions:
+  IsPrimaryRegion: !Equals [!Ref PrimaryKeyArn, '']
+  IsReplicaRegion: !Not [!Equals [!Ref PrimaryKeyArn, '']]
+
+Resources:
+  OrderFlowPrimaryMrk:
+    Type: AWS::KMS::Key
+    Condition: IsPrimaryRegion
+    Properties:
+      Description: OrderFlow primary multi-Region symmetric KMS key.
+      MultiRegion: true
+      EnableKeyRotation: true
+      RotationPeriodInDays: 90
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: orderflow-primary-mrk-policy
+        Statement:
+          - Sid: AllowAccountRootAdministration
+            Effect: Allow
+            Principal:
+              AWS:
+                !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowOrgWorkloadsDataKeyAndDecrypt
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+          - Sid: AllowCloudFrontOacSseKmsDecrypt
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowS3AndBackupViaService
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - kms:CreateGrant
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService:
+                  - !Sub 's3.${AWS::Region}.amazonaws.com'
+                  - !Sub 'backup.${AWS::Region}.amazonaws.com'
+
+  OrderFlowReplicaMrk:
+    Type: AWS::KMS::ReplicaKey
+    Condition: IsReplicaRegion
+    Properties:
+      PrimaryKeyArn: !Ref PrimaryKeyArn
+      Description: OrderFlow eu-west-1 multi-Region replica KMS key.
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: orderflow-replica-mrk-policy
+        Statement:
+          - Sid: AllowAccountRootAdministration
+            Effect: Allow
+            Principal:
+              AWS:
+                !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowOrgWorkloadsDataKeyAndDecrypt
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+          - Sid: AllowS3AndBackupViaService
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - kms:CreateGrant
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService:
+                  - !Sub 's3.${AWS::Region}.amazonaws.com'
+                  - !Sub 'backup.${AWS::Region}.amazonaws.com'
+
+  OrderFlowMrkAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/orderflow-data-mrk
+      TargetKeyId: !If
+        - IsPrimaryRegion
+        - !Ref OrderFlowPrimaryMrk
+        - !Ref OrderFlowReplicaMrk
+
+Outputs:
+  ActiveMrkArn:
+    Description: ARN of the active KMS MRK (primary or replica).
+    Value: !If
+      - IsPrimaryRegion
+      - !GetAtt OrderFlowPrimaryMrk.Arn
+      - !GetAtt OrderFlowReplicaMrk.Arn
+  AliasName:
+    Description: Standardized KMS alias across regions.
+    Value: !Ref OrderFlowMrkAlias

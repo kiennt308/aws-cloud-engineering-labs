@@ -1,0 +1,140 @@
+# OrderFlow Global - Hardened S3, S3 Express One Zone & S3 Tables
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global hardened S3 assets bucket, single-AZ S3 Express
+  DirectoryBucket, and Apache Iceberg S3Tables TableBucket.
+
+Parameters:
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: KMS MRK ARN encrypting S3 buckets and S3 Tables.
+  OrganizationId:
+    Type: String
+    Default: o-orderflow1
+    AllowedPattern: ^o-[a-z0-9]{10,32}$
+    Description: AWS Organizations ID for bucket data perimeter.
+  ExpressAvailabilityZoneId:
+    Type: String
+    Default: use1-az4
+    Description: Physical AZ ID hosting the S3 Express directory bucket.
+
+Resources:
+  OrderFlowAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'orderflow-assets-${AWS::AccountId}'
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKeyArn
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TierAndExpireNoncurrentVersions
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  OrderFlowAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref OrderFlowAssetsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt OrderFlowAssetsBucket.Arn
+              - !Sub '${OrderFlowAssetsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: DenyUnencryptedPutObject
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${OrderFlowAssetsBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+          - Sid: DenyNonOrgHumanOrWorkloadAccess
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt OrderFlowAssetsBucket.Arn
+              - !Sub '${OrderFlowAssetsBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+              Bool:
+                aws:PrincipalIsAWSService: 'false'
+
+  OrderFlowHotExpressBucket:
+    Type: AWS::S3Express::DirectoryBucket
+    Properties:
+      BucketName: !Join
+        - ''
+        - - orderflow-hot-
+          - !Ref AWS::AccountId
+          - '--'
+          - !Ref ExpressAvailabilityZoneId
+          - '--x-s3'
+      DataRedundancy: SingleAvailabilityZone
+      LocationName: !Ref ExpressAvailabilityZoneId
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKeyArn
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireEphemeralStagingObjects
+            Status: Enabled
+            ExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  OrderFlowIcebergTableBucket:
+    Type: AWS::S3Tables::TableBucket
+    Properties:
+      TableBucketName: !Sub 'orderflow-iceberg-tables-${AWS::AccountId}'
+      EncryptionConfiguration:
+        SSEAlgorithm: aws:kms
+        KMSKeyArn: !Ref KmsKeyArn
+      UnreferencedFileRemoval:
+        Status: Enabled
+        UnreferencedDays: 3
+        NoncurrentDays: 10
+
+Outputs:
+  AssetsBucketArn:
+    Description: ARN of the hardened standard S3 bucket.
+    Value: !GetAtt OrderFlowAssetsBucket.Arn
+  ExpressDirectoryBucketArn:
+    Description: ARN of the S3 Express One Zone directory bucket.
+    Value: !GetAtt OrderFlowHotExpressBucket.Arn
+  IcebergTableBucketArn:
+    Description: ARN of the S3 Tables Apache Iceberg table bucket.
+    Value: !GetAtt OrderFlowIcebergTableBucket.TableBucketARN

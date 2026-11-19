@@ -1,0 +1,80 @@
+# OrderFlow Global AWS Security Posture Profile for Prowler v5.14.2
+# Author: Kien Nguyen | License: Apache-2.0
+#
+# Run against orderflow-audit or workload accounts:
+#   prowler aws \
+#     --config-file ch08/03-prowler-compliance-profile.yaml \
+#     --checks \
+#       ec2_imdsv2_required \
+#       s3_bucket_public_access \
+#       kms_cmk_rotation_enabled \
+#       cloudfront_oac_enabled \
+#       guardduty_is_enabled \
+#       rds_instance_storage_encrypted \
+#     --region us-east-1 eu-west-1
+
+aws:
+  # Enforce checks across all active OrderFlow AWS regions
+  mute_non_default_regions: false
+
+  # Scan all resources without truncation in orderflow-audit sweeps
+  max_scanned_resources_per_service: 0
+
+  # Strict credential & network hygiene thresholds
+  max_unused_access_keys_days: 30
+  max_console_access_days: 45
+  max_security_group_rules: 50
+  max_ec2_instance_age_in_days: 90
+
+  # Canonical OrderFlow AWS Organizations account boundaries
+  # Replace sample 12-digit IDs with live orderflow-* account IDs
+  trusted_account_ids:
+    - "111122223333"  # orderflow-prod
+    - "444455556666"  # orderflow-staging
+    - "777788889999"  # orderflow-audit
+    - "888899990000"  # orderflow-log-archive
+
+  # Restrict unapproved opt-in regions outside us-east-1 & eu-west-1
+  disallowed_regions:
+    - af-south-1
+    - ap-east-1
+    - ap-south-2
+    - ap-southeast-3
+    - ap-southeast-4
+    - eu-central-2
+    - eu-south-1
+    - eu-south-2
+    - il-central-1
+    - me-central-1
+    - me-south-1
+
+# Target baseline controls verified for OrderFlow Global PRR gates.
+# Note: In Prowler v5.14.2 check catalogs, ec2_imdsv2_required and
+# cloudfront_oac_enabled map to launch-template/instance IMDSv2 and
+# CloudFront S3 Origin Access Control checks depending on rule set.
+orderflow_profile:
+  name: orderflow-cspm-baseline
+  prowler_version: "5.14.2"
+  delegated_account: orderflow-audit
+  primary_regions:
+    - us-east-1
+    - eu-west-1
+  target_controls:
+    - id: ec2_imdsv2_required
+      severity: high
+      requirement: Enforce HttpTokens=required on EC2 & LaunchTemplates
+    - id: s3_bucket_public_access
+      severity: critical
+      requirement: Enable all 4 S3 Block Public Access flags
+    - id: kms_cmk_rotation_enabled
+      severity: medium
+      requirement: Annual automatic rotation on customer KMS CMKs
+    - id: cloudfront_oac_enabled
+      severity: high
+      requirement: Require CloudFront OAC SigV4 and retire legacy OAI
+    - id: guardduty_is_enabled
+      severity: high
+      requirement: GuardDuty active in us-east-1 and eu-west-1
+    - id: rds_instance_storage_encrypted
+      severity: high
+      requirement: Enforce KMS storage encryption on Aurora & RDS

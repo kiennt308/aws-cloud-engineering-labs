@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  OrderFlow AWS Fault Injection Service (FIS) ExperimentTemplate
+  (orderflow-az-brownout-drill) simulating partial AZ network
+  disruption in staging with mandatory CloudWatch alarm StopConditions.
+
+Metadata:
+  OrderFlowAccount: orderflow-staging
+  Author: Kien Nguyen
+  License: Apache-2.0
+
+Parameters:
+  Environment:
+    Type: String
+    Default: staging
+    AllowedValues:
+      - staging
+      - dev
+    Description: Restrict chaos drills to non-production subnets.
+
+  TargetAvailabilityZone:
+    Type: String
+    Default: us-east-1a
+    Description: Availability Zone targeted for partial brownout drill.
+
+  StopAlarmArn:
+    Type: String
+    MinLength: 20
+    Description: >-
+      ARN of CloudWatch alarm aborting FIS if 5xx error rates spike.
+
+  ExperimentDuration:
+    Type: String
+    Default: PT5M
+    AllowedPattern: "^PT[0-9]+[MSH]$"
+    Description: ISO-8601 duration for partial AZ disruption.
+
+Resources:
+  OrderFlowFisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "orderflow-fis-az-drill-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowFisAssumeRoleScoped
+            Effect: Allow
+            Principal:
+              Service: fis.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub
+                  - "arn:${Part}:fis:${Reg}:${Acct}:experiment/*"
+                  - Part: !Ref AWS::Partition
+                    Reg: !Ref AWS::Region
+                    Acct: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Sub
+          - "arn:${Part}:iam::aws:policy/service-role/${Pol}"
+          - Part: !Ref AWS::Partition
+            Pol: AWSFaultInjectionSimulatorNetworkAccess
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  OrderFlowAzBrownoutTemplate:
+    Type: AWS::FIS::ExperimentTemplate
+    Properties:
+      Description: >-
+        OrderFlow partial AZ brownout drill (orderflow-az-brownout-drill)
+        validating Zonal Autoshift and static stability under slowdown.
+      RoleArn: !GetAtt OrderFlowFisRole.Arn
+      StopConditions:
+        - Source: aws:cloudwatch:alarm
+          Value: !Ref StopAlarmArn
+      Targets:
+        StagingAzSubnets:
+          ResourceType: aws:ec2:subnet
+          ResourceTags:
+            Environment: !Ref Environment
+          Filters:
+            - Path: AvailabilityZone
+              Values:
+                - !Ref TargetAvailabilityZone
+          SelectionMode: COUNT(1)
+      Actions:
+        SimulateAzTrafficSlowdown:
+          ActionId: aws:network:disrupt-connectivity
+          Description: >-
+            Simulate partial AZ network disruption / traffic slowdown.
+          Parameters:
+            scope: availability-zone
+            duration: !Ref ExperimentDuration
+          Targets:
+            Subnets: StagingAzSubnets
+      Tags:
+        Name: orderflow-az-brownout-drill
+        Environment: !Ref Environment
+        ManagedBy: CloudFormation
+
+Outputs:
+  ExperimentTemplateId:
+    Description: FIS ExperimentTemplate ID for AZ brownout drills.
+    Value: !Ref OrderFlowAzBrownoutTemplate
+
+  FisExecutionRoleArn:
+    Description: IAM Role ARN assumed by AWS FIS during experiments.
+    Value: !GetAtt OrderFlowFisRole.Arn

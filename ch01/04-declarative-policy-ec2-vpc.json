@@ -1,0 +1,43 @@
+{
+  "ec2_attributes": {
+    "snapshot_block_public_sharing": {
+      "state": {
+        "@@assign": "block-all-sharing",
+        "@@operators_allowed_for_child_policies": [
+          "@@none"
+        ]
+      }
+    },
+    "instance_metadata_defaults": {
+      "http_endpoint": {
+        "@@assign": "enabled",
+        "@@operators_allowed_for_child_policies": [
+          "@@none"
+        ]
+      },
+      "http_tokens": {
+        "@@assign": "required",
+        "@@operators_allowed_for_child_policies": [
+          "@@none"
+        ]
+      },
+      "http_put_response_hop_limit": {
+        "@@assign": 1,
+        "@@operators_allowed_for_child_policies": [
+          "@@none"
+        ]
+      },
+      "instance_metadata_tags": {
+        "@@assign": "enabled"
+      }
+    },
+    "vpc_block_public_access": {
+      "internet_gateway_block_mode": {
+        "@@assign": "block-bidirectional",
+        "@@operators_allowed_for_child_policies": [
+          "@@none"
+        ]
+      }
+    }
+  }
+}

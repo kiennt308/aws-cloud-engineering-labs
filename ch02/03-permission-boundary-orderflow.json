@@ -1,0 +1,41 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowRegionalOrderFlowWorkloadActions",
+      "Effect": "Allow",
+      "Action": [
+        "s3:*",
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "secretsmanager:GetSecretValue",
+        "logs:*",
+        "sqs:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyBoundaryRemovalAndOrganizationChanges",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteUserPermissionsBoundary",
+        "iam:PutUserPermissionsBoundary",
+        "iam:DeletePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "organizations:*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

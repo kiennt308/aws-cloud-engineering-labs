@@ -1,0 +1,122 @@
+# 03-data-storage-and-crypto.guard
+# OrderFlow Global AWS Platform — Data & Crypto Guardrails (cfn-guard)
+# Target: cfn-guard v3.2.1
+# Copyright (c) 2026 Kien Nguyen. Licensed under Apache-2.0.
+
+let s3_buckets = Resources.*[
+  Type == "AWS::S3::Bucket"
+]
+
+let rds_clusters = Resources.*[
+  Type == "AWS::RDS::DBCluster"
+]
+
+let kms_keys = Resources.*[
+  Type == "AWS::KMS::Key"
+]
+
+let ec2_launch_templates = Resources.*[
+  Type == "AWS::EC2::LaunchTemplate"
+]
+
+let allowed_s3_sse = [
+  "aws:kms",
+  "aws:kms:dsse",
+  "AES256"
+]
+
+rule S3_BUCKET_PUBLIC_ACCESS_BLOCKED when %s3_buckets !empty {
+  %s3_buckets.Properties {
+    PublicAccessBlockConfiguration exists <<
+      S3 bucket must define PublicAccessBlockConfiguration.
+    >>
+    PublicAccessBlockConfiguration {
+      BlockPublicAcls == true
+      IgnorePublicAcls == true
+      BlockPublicPolicy == true
+      RestrictPublicBuckets == true <<
+        All four S3 PublicAccessBlockConfiguration flags must be true.
+      >>
+    }
+  }
+}
+
+rule S3_BUCKET_OWNER_ENFORCED when %s3_buckets !empty {
+  %s3_buckets.Properties {
+    OwnershipControls exists <<
+      S3 bucket must configure OwnershipControls.
+    >>
+    OwnershipControls.Rules exists
+    OwnershipControls.Rules !empty <<
+      S3 OwnershipControls.Rules must be non-empty.
+    >>
+    OwnershipControls.Rules[*].ObjectOwnership == "BucketOwnerEnforced" <<
+      S3 OwnershipControls must set ObjectOwnership = BucketOwnerEnforced.
+    >>
+  }
+}
+
+rule S3_BUCKET_ENCRYPTION_ENABLED when %s3_buckets !empty {
+  %s3_buckets.Properties {
+    BucketEncryption exists <<
+      S3 bucket must enable BucketEncryption.
+    >>
+    BucketEncryption.ServerSideEncryptionConfiguration exists
+    BucketEncryption.ServerSideEncryptionConfiguration !empty <<
+      S3 BucketEncryption must define encryption rules.
+    >>
+    some BucketEncryption.ServerSideEncryptionConfiguration[*] {
+      ServerSideEncryptionByDefault exists
+      ServerSideEncryptionByDefault.SSEAlgorithm IN %allowed_s3_sse <<
+        S3 bucket must use SSE-KMS (aws:kms) or AES256 encryption.
+      >>
+    }
+  }
+}
+
+rule S3_BUCKET_VERSIONING_ENABLED when %s3_buckets !empty {
+  %s3_buckets.Properties {
+    VersioningConfiguration exists <<
+      S3 bucket must enable VersioningConfiguration.
+    >>
+    VersioningConfiguration.Status == "Enabled" <<
+      S3 VersioningConfiguration.Status must be Enabled.
+    >>
+  }
+}
+
+rule RDS_CLUSTER_ENCRYPTED_AND_BACKUP when %rds_clusters !empty {
+  %rds_clusters.Properties {
+    StorageEncrypted exists
+    StorageEncrypted == true <<
+      Aurora/RDS DBCluster must set StorageEncrypted to true.
+    >>
+    BackupRetentionPeriod exists
+    BackupRetentionPeriod >= 7 <<
+      Aurora/RDS DBCluster BackupRetentionPeriod must be >= 7 days.
+    >>
+  }
+}
+
+rule KMS_KEY_ROTATION_ENABLED when %kms_keys !empty {
+  %kms_keys.Properties {
+    EnableKeyRotation exists
+    EnableKeyRotation == true <<
+      AWS KMS Key must enable key rotation (EnableKeyRotation: true).
+    >>
+  }
+}
+
+rule EC2_LAUNCH_TEMPLATE_IMDSV2_ONLY when %ec2_launch_templates !empty {
+  %ec2_launch_templates.Properties {
+    LaunchTemplateData exists <<
+      EC2 LaunchTemplate must define LaunchTemplateData.
+    >>
+    LaunchTemplateData.MetadataOptions exists <<
+      LaunchTemplateData must configure MetadataOptions for IMDSv2.
+    >>
+    LaunchTemplateData.MetadataOptions.HttpTokens == "required" <<
+      LaunchTemplate must enforce IMDSv2 (HttpTokens: required).
+    >>
+  }
+}

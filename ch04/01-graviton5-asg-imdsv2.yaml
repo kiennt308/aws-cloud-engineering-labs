@@ -1,0 +1,146 @@
+# OrderFlow Global - Hardened Graviton5 Launch Template and 3-AZ ASG
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global hardened Graviton5 (M9g) LaunchTemplate enforcing
+  IMDSv2, encrypted GP3 EBS volumes, and 3-AZ CapacityRebalance ASG.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - staging
+    Description: Deployment environment slug.
+  VpcSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Three private subnet IDs spanning three AZs.
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group allowing ALB ingress and egress only.
+  InstanceProfileName:
+    Type: String
+    Description: Existing IAM instance profile name for compute nodes.
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: Customer-managed KMS key ARN for GP3 EBS encryption.
+  Arm64AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: >-
+      /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: SSM parameter resolving latest AL2023 arm64 AMI.
+  PrimaryInstanceType:
+    Type: String
+    Default: m9g.large
+    AllowedValues:
+      - m9g.large
+      - m9g.xlarge
+      - c9g.large
+      - m8g.large
+    Description: Primary Graviton5 or Graviton4 instance type.
+  FallbackInstanceType:
+    Type: String
+    Default: m8g.large
+    AllowedValues:
+      - m8g.large
+      - m8g.xlarge
+      - c8g.large
+    Description: Secondary Graviton4 type for Spot diversification.
+
+Resources:
+  GravitonLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub 'orderflow-${EnvironmentName}-graviton-lt'
+      LaunchTemplateData:
+        ImageId: !Ref Arm64AmiId
+        InstanceType: !Ref PrimaryInstanceType
+        IamInstanceProfile:
+          Name: !Ref InstanceProfileName
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: false
+            DeleteOnTermination: true
+            Groups:
+              - !Ref SecurityGroupId
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: enabled
+        Monitoring:
+          Enabled: true
+        EbsOptimized: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              Iops: 3000
+              Throughput: 125
+              Encrypted: true
+              KmsKeyId: !Ref KmsKeyArn
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub 'orderflow-${EnvironmentName}-api-node'
+              - Key: Architecture
+                Value: arm64
+              - Key: BackupTier
+                Value: Critical
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub 'orderflow-${EnvironmentName}-root-gp3'
+              - Key: Architecture
+                Value: arm64
+
+  OrderFlowComputeAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName:
+        !Sub 'orderflow-${EnvironmentName}-compute-asg'
+      VPCZoneIdentifier: !Ref VpcSubnetIds
+      MinSize: '3'
+      MaxSize: '12'
+      DesiredCapacity: '3'
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      CapacityRebalance: true
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref GravitonLaunchTemplate
+            Version: !GetAtt GravitonLaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: !Ref PrimaryInstanceType
+            - InstanceType: !Ref FallbackInstanceType
+        InstancesDistribution:
+          OnDemandBaseCapacity: 3
+          OnDemandPercentageAboveBaseCapacity: 50
+          SpotAllocationStrategy: price-capacity-optimized
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+          PropagateAtLaunch: true
+        - Key: Workload
+          Value: orderflow-api
+          PropagateAtLaunch: true
+        - Key: Architecture
+          Value: arm64
+          PropagateAtLaunch: true
+
+Outputs:
+  LaunchTemplateId:
+    Description: ID of the hardened Graviton LaunchTemplate.
+    Value: !Ref GravitonLaunchTemplate
+  LatestTemplateVersion:
+    Description: Latest version number of the LaunchTemplate.
+    Value: !GetAtt GravitonLaunchTemplate.LatestVersionNumber
+  AutoScalingGroupName:
+    Description: Name of the 3-AZ Graviton Auto Scaling Group.
+    Value: !Ref OrderFlowComputeAsg

@@ -1,0 +1,105 @@
+# OrderFlow Global - Aurora PG 18 Global Secondary Cluster (eu-west-1)
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global secondary Aurora PostgreSQL 18 DR cluster in
+  eu-west-1 encrypted with regional KMS MRK replica and db.r8g reader.
+
+Parameters:
+  GlobalClusterIdentifier:
+    Type: String
+    Default: orderflow-global-aurora
+    Description: Existing Aurora Global Database ID from us-east-1.
+  SecondaryClusterIdentifier:
+    Type: String
+    Default: orderflow-aurora-eu-west-1
+    Description: Secondary Aurora cluster ID in eu-west-1.
+  EngineVersion:
+    Type: String
+    Default: '18.3'
+    AllowedValues:
+      - '18.3'
+      - '17.4'
+    Description: Must match the primary Aurora Global engine version.
+  ParameterGroupFamily:
+    Type: String
+    Default: aurora-postgresql18
+    AllowedValues:
+      - aurora-postgresql18
+      - aurora-postgresql17
+    Description: DBClusterParameterGroup family matching EngineVersion.
+  InstanceClass:
+    Type: String
+    Default: db.r8g.large
+    AllowedValues:
+      - db.r8g.large
+      - db.r8g.xlarge
+      - db.r7g.large
+    Description: Graviton4 memory-optimized DB instance class.
+  KmsReplicaKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/mrk-[a-z0-9-]+$
+    Description: KMS MRK replica ARN in eu-west-1.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private database subnets across three AZs in eu-west-1.
+  DbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group restricting port 5432 in eu-west-1.
+
+Resources:
+  AuroraSecondaryParamGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: Secondary Aurora PG18 TLS and slow-query parameters.
+      Family: !Ref ParameterGroupFamily
+      Parameters:
+        rds.force_ssl: '1'
+        log_min_duration_statement: '500'
+        shared_preload_libraries: pg_stat_statements
+
+  AuroraSecondarySubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private eu-west-1 subnets for Aurora DR.
+      SubnetIds: !Ref PrivateSubnetIds
+
+  OrderFlowSecondaryCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier: !Ref SecondaryClusterIdentifier
+      GlobalClusterIdentifier: !Ref GlobalClusterIdentifier
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      DBClusterParameterGroupName: !Ref AuroraSecondaryParamGroup
+      DBSubnetGroupName: !Ref AuroraSecondarySubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DbSecurityGroupId
+      StorageEncrypted: true
+      KmsKeyId: !Ref KmsReplicaKeyArn
+      BackupRetentionPeriod: 14
+      DeletionProtection: true
+      EnableIAMDatabaseAuthentication: true
+      EnableCloudwatchLogsExports:
+        - postgresql
+      Port: 5432
+
+  OrderFlowSecondaryReader:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: orderflow-aurora-euw1-reader
+      DBClusterIdentifier: !Ref OrderFlowSecondaryCluster
+      Engine: aurora-postgresql
+      DBInstanceClass: !Ref InstanceClass
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsKMSKeyId: !Ref KmsReplicaKeyArn
+      PerformanceInsightsRetentionPeriod: 7
+
+Outputs:
+  SecondaryReaderEndpoint:
+    Description: Aurora Global local read endpoint in eu-west-1.
+    Value: !GetAtt OrderFlowSecondaryCluster.ReadEndpoint.Address
+  SecondaryClusterArn:
+    Description: ARN of the secondary DR Aurora DB cluster.
+    Value: !GetAtt OrderFlowSecondaryCluster.DBClusterArn

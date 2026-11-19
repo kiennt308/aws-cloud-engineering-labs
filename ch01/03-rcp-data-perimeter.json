@@ -1,0 +1,43 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EnforceOrganizationDataPerimeter",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "s3:*",
+        "sts:*",
+        "kms:*",
+        "sqs:*",
+        "secretsmanager:*",
+        "ecr:*",
+        "dynamodb:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": {
+          "aws:PrincipalOrgID": "${aws:ResourceOrgID}"
+        },
+        "BoolIfExists": {
+          "aws:PrincipalIsAWSService": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyNonTlsTransportOnS3AndSqs",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "s3:*",
+        "sqs:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    }
+  ]
+}

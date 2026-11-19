@@ -1,0 +1,201 @@
+# OrderFlow Global - Immutable ECR Repositories & Cross-Region Replication
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global Amazon ECR repositories with IMMUTABLE tags,
+  scan-on-push, KMS encryption, 20-image lifecycle, and replication.
+
+Parameters:
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: Customer-managed KMS key ARN for ECR encryption.
+  OrganizationId:
+    Type: String
+    Default: o-orderflow1
+    AllowedPattern: ^o-[a-z0-9]{10,32}$
+    Description: AWS Organizations ID enforcing pull data perimeter.
+  SecondaryRegion:
+    Type: String
+    Default: eu-west-1
+    Description: Disaster recovery destination region for ECR images.
+
+Resources:
+  OrderGatewayRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: orderflow/order-gateway
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKeyArn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Retain latest 20 tagged release images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v", "sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOrgWorkloadPull
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+
+  OrderServiceRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: orderflow/order-service
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKeyArn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Retain latest 20 tagged release images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v", "sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOrgWorkloadPull
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+
+  PaymentWorkerRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: orderflow/payment-worker
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKeyArn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Retain latest 20 tagged release images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v", "sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOrgWorkloadPull
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Condition:
+              StringEquals:
+                aws:PrincipalOrgID: !Ref OrganizationId
+
+  EcrCrossRegionReplication:
+    Type: AWS::ECR::ReplicationConfiguration
+    Properties:
+      ReplicationConfiguration:
+        Rules:
+          - Destinations:
+              - Region: !Ref SecondaryRegion
+                RegistryId: !Ref AWS::AccountId
+            RepositoryFilters:
+              - Filter: orderflow/
+                FilterType: PREFIX_MATCH
+
+Outputs:
+  OrderGatewayUri:
+    Description: Immutable ECR URI for orderflow/order-gateway.
+    Value: !GetAtt OrderGatewayRepo.RepositoryUri
+  OrderServiceUri:
+    Description: Immutable ECR URI for orderflow/order-service.
+    Value: !GetAtt OrderServiceRepo.RepositoryUri
+  PaymentWorkerUri:
+    Description: Immutable ECR URI for orderflow/payment-worker.
+    Value: !GetAtt PaymentWorkerRepo.RepositoryUri

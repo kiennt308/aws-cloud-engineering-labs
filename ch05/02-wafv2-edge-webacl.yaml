@@ -1,0 +1,104 @@
+# OrderFlow Global - AWS WAF v2 Edge WebACL & Rate-Based Defense
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global AWS WAF v2 WebACL (orderflow-edge-acl) combining
+  Managed Rule Groups, 1000-req/5-min IP rate limiting, and logging.
+
+Parameters:
+  WebAclScope:
+    Type: String
+    Default: CLOUDFRONT
+    AllowedValues:
+      - CLOUDFRONT
+      - REGIONAL
+    Description: CLOUDFRONT (deploy in us-east-1) or REGIONAL for ALBs.
+  RateLimitPer5Min:
+    Type: Number
+    Default: 1000
+    MinValue: 100
+    MaxValue: 20000000
+    Description: Maximum requests per IP in a 5-minute (300s) window.
+  KmsKeyArn:
+    Type: String
+    AllowedPattern: ^arn:aws:kms:[a-z0-9-]+:\d{12}:key/.+$
+    Description: KMS key ARN encrypting the WAF CloudWatch log group.
+
+Resources:
+  OrderFlowEdgeWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: orderflow-edge-acl
+      Description: OrderFlow layered L7 edge WebACL perimeter.
+      Scope: !Ref WebAclScope
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: orderflowEdgeAcl
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 10
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: orderflowCommonRules
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 20
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: orderflowKnownBadInputs
+        - Name: OrderFlowRateLimitPerIp
+          Priority: 30
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref RateLimitPer5Min
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: orderflowRateLimitIp
+
+  WafLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: aws-waf-logs-orderflow-edge
+      RetentionInDays: 90
+      KmsKeyId: !Ref KmsKeyArn
+
+  WafLoggingConfig:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt OrderFlowEdgeWebAcl.Arn
+      LogDestinationConfigs:
+        - !GetAtt WafLogGroup.Arn
+      RedactedFields:
+        - SingleHeader:
+            Name: authorization
+        - SingleHeader:
+            Name: cookie
+
+Outputs:
+  WebAclArn:
+    Description: ARN of the OrderFlow WAFv2 WebACL.
+    Value: !GetAtt OrderFlowEdgeWebAcl.Arn
+  WebAclId:
+    Description: ID of the OrderFlow WAFv2 WebACL.
+    Value: !GetAtt OrderFlowEdgeWebAcl.Id

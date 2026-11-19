@@ -1,0 +1,315 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  OrderFlow Multi-Region KMS-encrypted CloudTrail Audit Trail (S3
+  archive + CloudWatch Logs Insights replacing maintenance-mode
+  CloudTrail Lake) and EventBridge auto-triage routing for GuardDuty
+  findings (severity >= 7.0) to encrypted SNS and SQS targets.
+
+Metadata:
+  OrderFlowAccount: orderflow-audit
+  Author: Kien Nguyen
+  License: Apache-2.0
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - staging
+    Description: Environment label for CloudTrail archive and triage.
+
+  IsOrganizationTrail:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Set true when deployed in delegated orderflow-audit.
+
+Resources:
+  SecurityTriageKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: >-
+        OrderFlow KMS CMK encrypting CloudTrail, Logs, SNS, and SQS.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdminControl
+            Effect: Allow
+            Principal:
+              AWS: !Sub
+                - "arn:${Part}:iam::${Acct}:root"
+                - Part: !Ref AWS::Partition
+                  Acct: !Ref AWS::AccountId
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudTrailAndLogsEncryption
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+                - !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowEventBridgeAndSnsEncryption
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - sns.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+            Resource: "*"
+      Tags:
+        - Key: AccountScope
+          Value: orderflow-audit
+
+  SecurityTriageKmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/orderflow-sec-triage-${Environment}"
+      TargetKeyId: !Ref SecurityTriageKmsKey
+
+  AuditTrailArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub
+        - "orderflow-audit-trail-${Env}-${Acct}"
+        - Env: !Ref Environment
+          Acct: !Ref AWS::AccountId
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt SecurityTriageKmsKey.Arn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToGlacierAt90Days
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+
+  AuditTrailArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditTrailArchiveBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt AuditTrailArchiveBucket.Arn
+              - !Sub "${AuditTrailArchiveBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          - Sid: AllowCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AuditTrailArchiveBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub
+              - "${Arn}/AWSLogs/${Acct}/*"
+              - Arn: !GetAtt AuditTrailArchiveBucket.Arn
+                Acct: !Ref AWS::AccountId
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  AuditTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/cloudtrail/orderflow-${Environment}"
+      RetentionInDays: 365
+      KmsKeyId: !GetAtt SecurityTriageKmsKey.Arn
+
+  AuditTrailLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "orderflow-cloudtrail-cw-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeliverCloudTrailToLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub
+                  - "arn:${P}:logs:${R}:${A}:log-group:${G}:*"
+                  - P: !Ref AWS::Partition
+                    R: !Ref AWS::Region
+                    A: !Ref AWS::AccountId
+                    G: !Ref AuditTrailLogGroup
+
+  OrderFlowAuditTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - AuditTrailArchiveBucketPolicy
+    Properties:
+      TrailName: !Sub "orderflow-audit-trail-${Environment}"
+      S3BucketName: !Ref AuditTrailArchiveBucket
+      CloudWatchLogsLogGroupArn: !GetAtt AuditTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt AuditTrailLogsRole.Arn
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      IsOrganizationTrail: !Ref IsOrganizationTrail
+      EnableLogFileValidation: true
+      KMSKeyId: !GetAtt SecurityTriageKmsKey.Arn
+      Tags:
+        - Key: AccountScope
+          Value: orderflow-audit
+        - Key: Environment
+          Value: !Ref Environment
+
+  TriageDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      guard:
+        SuppressedRules:
+          - SQS_PRIMARY_REDRIVE_POLICY
+    Properties:
+      QueueName: !Sub "orderflow-gd-triage-dlq-${Environment}"
+      KmsMasterKeyId: !Ref SecurityTriageKmsKey
+      MessageRetentionPeriod: 1209600
+
+  SecurityTriageQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "orderflow-gd-triage-${Environment}"
+      KmsMasterKeyId: !Ref SecurityTriageKmsKey
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TriageDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  SecurityTriageTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "orderflow-gd-alerts-${Environment}"
+      KmsMasterKeyId: !Ref SecurityTriageKmsKey
+
+  SecurityTriageTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SecurityTriageTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgePublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SecurityTriageTopic
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt GuardDutyHighSeverityRule.Arn
+
+  SecurityTriageQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SecurityTriageQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSnsDeliveryToTriageQueue
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt SecurityTriageQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref SecurityTriageTopic
+
+  TriageTopicToQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SecurityTriageTopic
+      Protocol: sqs
+      Endpoint: !GetAtt SecurityTriageQueue.Arn
+      RawMessageDelivery: true
+
+  GuardDutyHighSeverityRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "orderflow-gd-high-crit-${Environment}"
+      Description: >-
+        Route GuardDuty findings with severity >= 7.0 to encrypted
+        OrderFlow security triage SNS topic and SQS queue.
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - GuardDuty Finding
+        detail:
+          severity:
+            - numeric:
+                - ">="
+                - 7.0
+      Targets:
+        - Id: EncryptedSecurityAlertsTopic
+          Arn: !Ref SecurityTriageTopic
+
+Outputs:
+  AuditTrailArn:
+    Description: ARN of the encrypted Multi-Region CloudTrail Trail.
+    Value: !GetAtt OrderFlowAuditTrail.Arn
+
+  TriageTopicArn:
+    Description: Encrypted SNS topic for GuardDuty alerts.
+    Value: !Ref SecurityTriageTopic
+
+  TriageQueueUrl:
+    Description: Encrypted SQS triage queue subscribed to alerts.
+    Value: !Ref SecurityTriageQueue

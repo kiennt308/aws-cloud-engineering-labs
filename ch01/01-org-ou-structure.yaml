@@ -1,0 +1,180 @@
+# OrderFlow Global - Multi-Account OU Structure, SCP, and RCP Baseline
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global AWS Organizations OU hierarchy (Security,
+  Infrastructure, Workloads/Prod, Workloads/NonProd, Sandbox) with
+  preventive SCP and Resource Control Policy (RCP) guardrails.
+
+Parameters:
+  OrganizationRootId:
+    Type: String
+    AllowedPattern: ^r-[0-9a-z]{4,32}$
+    Description: AWS Organizations Root ID (r-xxxx) for OU attachment.
+
+Resources:
+  SecurityOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: Security
+      ParentId: !Ref OrganizationRootId
+      Tags:
+        - Key: Domain
+          Value: SecurityAndAudit
+
+  InfrastructureOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: Infrastructure
+      ParentId: !Ref OrganizationRootId
+      Tags:
+        - Key: Domain
+          Value: NetworkAndSharedServices
+
+  WorkloadsOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: Workloads
+      ParentId: !Ref OrganizationRootId
+      Tags:
+        - Key: Domain
+          Value: ApplicationWorkloads
+
+  ProdOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: Prod
+      ParentId: !Ref WorkloadsOU
+      Tags:
+        - Key: Environment
+          Value: prod
+
+  NonProdOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: NonProd
+      ParentId: !Ref WorkloadsOU
+      Tags:
+        - Key: Environment
+          Value: nonprod
+
+  SandboxOU:
+    Type: AWS::Organizations::OrganizationalUnit
+    Properties:
+      Name: Sandbox
+      ParentId: !Ref OrganizationRootId
+      Tags:
+        - Key: Environment
+          Value: sandbox
+
+  OrderFlowBaselineSCP:
+    Type: AWS::Organizations::Policy
+    Properties:
+      Name: orderflow-baseline-scp
+      Description: >
+        Restrict active regions to us-east-1/eu-west-1, protect audit
+        logs, and enforce IMDSv2 on EC2 launches.
+      Type: SERVICE_CONTROL_POLICY
+      TargetIds:
+        - !Ref WorkloadsOU
+        - !Ref SandboxOU
+      Content:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonApprovedRegions
+            Effect: Deny
+            NotAction:
+              - 'iam:*'
+              - 'sts:*'
+              - 'cloudfront:*'
+              - 'route53:*'
+              - 'organizations:*'
+              - 'account:*'
+              - 'billing:*'
+              - 'budgets:*'
+              - 'ce:*'
+              - 'support:*'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'aws:RequestedRegion':
+                  - us-east-1
+                  - eu-west-1
+          - Sid: DenyDisableSecurityControls
+            Effect: Deny
+            Action:
+              - 'cloudtrail:StopLogging'
+              - 'cloudtrail:DeleteTrail'
+              - 'guardduty:DeleteDetector'
+              - 'backup:DeleteBackupVault'
+            Resource: '*'
+          - Sid: DenyLaunchWithoutIMDSv2
+            Effect: Deny
+            Action: 'ec2:RunInstances'
+            Resource: 'arn:aws:ec2:*:*:instance/*'
+            Condition:
+              StringNotEquals:
+                'ec2:MetadataHttpTokens': required
+
+  OrderFlowDataPerimeterRCP:
+    Type: AWS::Organizations::Policy
+    Properties:
+      Name: orderflow-data-perimeter-rcp
+      Description: >
+        Enforce organization boundary and TLS transport across core
+        storage, key, queue, secret, registry, and database resources.
+      Type: RESOURCE_CONTROL_POLICY
+      TargetIds:
+        - !Ref WorkloadsOU
+        - !Ref InfrastructureOU
+        - !Ref SandboxOU
+      Content:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnforceOrgPerimeterOnDataPlane
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:*'
+              - 'sts:*'
+              - 'kms:*'
+              - 'sqs:*'
+              - 'secretsmanager:*'
+              - 'ecr:*'
+              - 'dynamodb:*'
+            Resource: '*'
+            Condition:
+              StringNotEqualsIfExists:
+                'aws:PrincipalOrgID': '${aws:ResourceOrgID}'
+              BoolIfExists:
+                'aws:PrincipalIsAWSService': 'false'
+          - Sid: DenyInsecureTransportOnS3AndSqs
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:*'
+              - 'sqs:*'
+            Resource: '*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+Outputs:
+  SecurityOUId:
+    Description: Security OU ID for audit and log-archive accounts.
+    Value: !Ref SecurityOU
+  InfrastructureOUId:
+    Description: Infrastructure OU ID for network hub and shared OCI.
+    Value: !Ref InfrastructureOU
+  ProdOUId:
+    Description: Production workloads OU ID.
+    Value: !Ref ProdOU
+  NonProdOUId:
+    Description: Non-production workloads OU ID.
+    Value: !Ref NonProdOU
+  BaselineSCPId:
+    Description: OrderFlow baseline Service Control Policy ID.
+    Value: !Ref OrderFlowBaselineSCP
+  DataPerimeterRCPId:
+    Description: OrderFlow data perimeter Resource Control Policy ID.
+    Value: !Ref OrderFlowDataPerimeterRCP

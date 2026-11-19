@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  INTENTIONALLY INSECURE NEGATIVE FIXTURE FOR POLICY GATE TESTING.
+  Tests cfn-guard v3.2.1, Conftest OPA, and Trivy config rejections
+  across IMDSv1, public S3, retired CloudFront OAI, and unencrypted RDS.
+  NEVER deploy this template to any AWS account.
+
+Metadata:
+  FixturePurpose: negative-policy-test
+  Author: Kien Nguyen
+  License: Apache-2.0
+
+Parameters:
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-arm64
+    Description: Baseline AMI ID for schema-valid LaunchTemplate test.
+
+Resources:
+  # Anti-pattern 1: LaunchTemplate allowing IMDSv1 (HttpTokens optional)
+  InsecureLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: orderflow-insecure-lt-fixture
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: m7i.xlarge
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: optional
+          HttpPutResponseHopLimit: 2
+
+  # Anti-pattern 2: Public S3 bucket missing encryption & versioning
+  InsecurePublicBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "orderflow-insecure-fixture-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  # Anti-pattern 3: Retired CloudFront OAI + insecure HTTP (allow-all)
+  RetiredOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: Legacy OAI fixture rejected by OrderFlow policy gates
+
+  InsecureCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Negative fixture using retired OAI and AllowAll HTTP
+        Origins:
+          - Id: InsecureS3Origin
+            DomainName: !GetAtt InsecurePublicBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub
+                - "origin-access-identity/cloudfront/${OaiId}"
+                - OaiId: !Ref RetiredOriginAccessIdentity
+        DefaultCacheBehavior:
+          TargetOriginId: InsecureS3Origin
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6"
+          AllowedMethods:
+            - GET
+            - HEAD
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  # Anti-pattern 4: Publicly accessible, unencrypted RDS DBInstance
+  InsecureDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: orderflow-insecure-db-fixture
+      DBInstanceClass: db.t4g.medium
+      Engine: postgres
+      EngineVersion: "18.3"
+      AllocatedStorage: 20
+      MasterUsername: orderflow_admin
+      ManageMasterUserPassword: true
+      PubliclyAccessible: true
+      StorageEncrypted: false
+      BackupRetentionPeriod: 0

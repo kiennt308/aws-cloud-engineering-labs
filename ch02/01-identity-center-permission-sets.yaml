@@ -1,0 +1,145 @@
+# OrderFlow Global - IAM Identity Center Permission Sets
+# Copyright 2026 Kien Nguyen (Apache-2.0 License)
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OrderFlow Global AWS IAM Identity Center permission sets replacing
+  static IAM users with short-lived federated SSO sessions.
+
+Parameters:
+  IdentityCenterInstanceArn:
+    Type: String
+    Default: arn:aws:sso:::instance/ssoins-1234567890abcdef
+    AllowedPattern: >-
+      ^arn:aws:sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}$
+    Description: IAM Identity Center instance ARN from management acct.
+  BoundaryPolicyName:
+    Type: String
+    Default: orderflow-workload-boundary
+    Description: Customer-managed permission boundary policy name.
+
+Resources:
+  OrderFlowPlatformAdmin:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      InstanceArn: !Ref IdentityCenterInstanceArn
+      Name: OrderFlowPlatformAdmin
+      Description: >
+        Platform engineering access with 4h sessions and boundary
+        enforcement on workload role creation.
+      SessionDuration: PT4H
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowReadOnlyIamInspection
+            Effect: Allow
+            Action:
+              - 'iam:Get*'
+              - 'iam:List*'
+            Resource: '*'
+          - Sid: AllowBoundedOrderFlowRoleCreation
+            Effect: Allow
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:AttachRolePolicy'
+              - 'iam:PutRolePolicy'
+              - 'iam:TagRole'
+              - 'iam:PassRole'
+            Resource: 'arn:aws:iam::*:role/orderflow-*'
+            Condition:
+              StringEquals:
+                'iam:PermissionsBoundary': !Join
+                  - ''
+                  - - 'arn:aws:iam::'
+                    - !Ref 'AWS::AccountId'
+                    - ':policy/'
+                    - !Ref BoundaryPolicyName
+          - Sid: DenyOrganizationDestructiveActions
+            Effect: Deny
+            Action:
+              - 'organizations:LeaveOrganization'
+              - 'organizations:DeleteOrganization'
+              - 'account:CloseAccount'
+            Resource: '*'
+      Tags:
+        - Key: Platform
+          Value: OrderFlow
+        - Key: AccessTier
+          Value: Admin
+
+  OrderFlowDeveloperReadOnly:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      InstanceArn: !Ref IdentityCenterInstanceArn
+      Name: OrderFlowDeveloperReadOnly
+      Description: >
+        Read-only troubleshooting across logs and EKS with secret
+        plaintext reads explicitly denied.
+      SessionDuration: PT4H
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/job-function/ViewOnlyAccess
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowLogsAndEksDescribe
+            Effect: Allow
+            Action:
+              - 'logs:FilterLogEvents'
+              - 'logs:GetLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:GetQueryResults'
+              - 'eks:DescribeCluster'
+            Resource: '*'
+          - Sid: DenyPlaintextSecretsAndDecryption
+            Effect: Deny
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'kms:Decrypt'
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+            Resource: '*'
+      Tags:
+        - Key: Platform
+          Value: OrderFlow
+        - Key: AccessTier
+          Value: ReadOnly
+
+  OrderFlowBreakGlassIncident:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      InstanceArn: !Ref IdentityCenterInstanceArn
+      Name: OrderFlowBreakGlassIncident
+      Description: >
+        One-hour emergency incident response permission set guarded
+        against organization exit and CloudTrail deletion.
+      SessionDuration: PT1H
+      ManagedPolicies:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyAuditTrailAndOrgRemoval
+            Effect: Deny
+            Action:
+              - 'organizations:LeaveOrganization'
+              - 'organizations:DeleteOrganization'
+              - 'cloudtrail:DeleteTrail'
+              - 'cloudtrail:StopLogging'
+            Resource: '*'
+      Tags:
+        - Key: Platform
+          Value: OrderFlow
+        - Key: AccessTier
+          Value: BreakGlass
+
+Outputs:
+  PlatformAdminPermissionSetArn:
+    Description: ARN of OrderFlowPlatformAdmin permission set.
+    Value: !GetAtt OrderFlowPlatformAdmin.PermissionSetArn
+  DeveloperReadOnlyPermissionSetArn:
+    Description: ARN of OrderFlowDeveloperReadOnly permission set.
+    Value: !GetAtt OrderFlowDeveloperReadOnly.PermissionSetArn
+  BreakGlassPermissionSetArn:
+    Description: ARN of OrderFlowBreakGlassIncident permission set.
+    Value: !GetAtt OrderFlowBreakGlassIncident.PermissionSetArn
